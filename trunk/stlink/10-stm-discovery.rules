@@ -1,0 +1,22 @@
+# This file watches for a STMicro ST-Link or STM32VLDiscovery board.
+# See udev(7) for syntax.
+#
+# STLink Discovery (pci-0000:00:1d.1-usb-0:2:1.0-scsi-0:0:0:0)
+# SYMLINK+="stlink%n", 
+#, ENV{UDISKS_PRESENTATION_HIDE}:="1", ENV{UDISKS_PRESENTATION_NOPOLICY}:="1", ENV{DM_UDEV_DISABLE_DISK_RULES_FLAG}:="1"
+
+# , ENV{DM_UDEV_DISABLE_DISK_RULES_FLAG}:="1"
+
+ACTION!="add|change", GOTO="stlink_rules_end"
+
+SUBSYSTEMS=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="3744", MODE="0666", GROUP="tape", NAME="stlinkusb%n", ENV{STLINK}="1", OPTIONS="last_rule"
+
+# KERNEL=="sg[0-9]*", MODE="0666", GROUP="tape", NAME="stlinksg%n", SYMLINK+="stlinksg", OPTIONS="last_rule"
+
+KERNEL=="sg[0-9]*", MODE="0666", GROUP:="tape", NAME="stlink-sg%n", SYMLINK+="stlink"
+#, OPTIONS="last_rule"
+
+SUBSYSTEM=="scsi", ATTR{vendor}=="STM32", MODE="0666", GROUP="tape", NAME="stlinksg-scsi%n", SYMLINK+="stlinkscsi", OPTIONS="last_rule"
+
+
+LABEL="stlink_rules_end"
