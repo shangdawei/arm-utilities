@@ -3,12 +3,11 @@
 = Introduction =
 
 
- This program interacts with the STMicro USB STLink programming/debug interface for STMicro microcontrollers.  The STLink is found on STM8 and STM32VLDiscovery devices.
+This program interacts with the STMicro USB STLink programming/debug interface for STMicro microcontrollers.  The STLink is found on STM8 and STM32VLDiscovery devices.
 
-  Written December 2010 by Donald Becker and William Carlson.
-  This program may be used under the terms of the Gnu General Public License,
-  (GPL) v2 or v3.  Distribution under other terms requires an explicit
-  license from the authors.
+Written December 2010 by Donald Becker and William Carlson.
+This program may be used under the terms of the Gnu General Public License,
+(GPL) v2 or v3.  Distribution under other terms requires an explicit license from the authors.
 
 The communication is based on standard USB mass storage device, with its SCSI command protocol. The STLink operations encapsulated in vendor-specific SCSI commands.
 
