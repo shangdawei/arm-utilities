@@ -3,40 +3,28 @@
 = Introduction =
 
 
- This program interacts with the STMicro USB STLink programming/debug
-  interface for STMicro microcontrollers.  The STLink is found on STM8
-  and STM32VLDiscovery devices.
+ This program interacts with the STMicro USB STLink programming/debug interface for STMicro microcontrollers.  The STLink is found on STM8 and STM32VLDiscovery devices.
 
   Written December 2010 by Donald Becker and William Carlson.
   This program may be used under the terms of the Gnu General Public License,
   (GPL) v2 or v3.  Distribution under other terms requires an explicit
   license from the authors.
 
-  The communication is based on standard USB mass storage device, with
-  its SCSI command protocol. The STLink operations encapsulated in
-  vendor-specific SCSI commands.
+The communication is based on standard USB mass storage device, with its SCSI command protocol. The STLink operations encapsulated in vendor-specific SCSI commands.
 
-  We directly use the SCSI Generic (sg) ioctl() and data structures to
-  communicate with the STLink.  The alternative of using the
-  sgutils2/pass-through libraries might have taken less initial
-  development time, but otherwise add no value.  Those libraries are not
-  always installed, causing extra build and installation headaches.
-  Most of their functions are simple wrappers that add more complexity
-  than they hide.  Their only significant benefit, combining status values
-  from a unpredictable mix of different driver, host adapter, transport
-  and target combinations, does not apply when those are all emulated by
-  the STLink firmware.
+We directly use the SCSI Generic (sg) ioctl() and data structures to communicate with the STLink.  The alternative of using the sgutils2/pass-through libraries might have taken less initial development time, but otherwise add no value.  Those libraries are not always installed, causing extra build and installation headaches. Most of their functions are simple wrappers that add more complexity
+than they hide.  Their only significant benefit, combining status values from a unpredictable mix of different driver, host adapter, transport and target combinations, does not apply when those are all emulated by the STLink firmware.
 
 = References =
 
-   ST Micro Applications Notes
-   AN3154 Specification of the CAN bootloader protocol
-   AN3155 Specification of the USART bootloader protocol
-   AN3156 Specification of the USB DFU (Direct Firmware Upload) protocol
-  Related documents
-   http://www.usb.org/developers/devclass_docs/DFU_1.1.pdf
+ST Micro Applications Notes
+  AN3154 Specification of the CAN bootloader protocol
+  AN3155 Specification of the USART bootloader protocol
+  AN3156 Specification of the USB DFU (Direct Firmware Upload) protocol
+Related documents
+ http://www.usb.org/developers/devclass_docs/DFU_1.1.pdf
     [ Note: I have omitted all DFU support from this release. ]
-  USB Device Class Definition for Mass Storage Devices:
+ USB Device Class Definition for Mass Storage Devices:
    www.usb.org/developers/devclass_docs/usbmassbulk_10.pdf
 
 = Build notes =
@@ -47,22 +35,22 @@ The code was written to be as generic as possible.  It requires no special compi
 
 = Usage notes =
 
- This is a deeply broken device.  They apparently built the mass storage
- interface by cribbing the USB device table from a 32MB flash stick.  But
- the device doesn't have 32MB, only hard-wired responses that presents
- three tiny 'files'.  Not arbitrary responses, only ones to the exact
- USB commands that Windows would use, and only accurately filling in the
- fields that Windows uses.
+This is a deeply broken device.  They apparently built the mass storage
+interface by cribbing the USB device table from a 32MB flash stick.  But
+the device doesn't have 32MB, only hard-wired responses that presents
+three tiny 'files'.  Not arbitrary responses, only ones to the exact
+USB commands that Windows would use, and only accurately filling in the
+fields that Windows uses.
 
- The result is that non-Windows machines choke on this device.  (It's likely
- that future Windows versions will as well.)  Linux automatically checks the
- partition table and validates the extents.  It takes several minutes of
- periodic retries before the kernel gives up and decides it is truly broken.
+The result is that non-Windows machines choke on this device.  (It's likely
+that future Windows versions will as well.)  Linux automatically checks the
+partition table and validates the extents.  It takes several minutes of
+periodic retries before the kernel gives up and decides it is truly broken.
 
- Distributed with this utility is a udev rule file that speeds up
- the process by avoiding an automatic mount.
+Distributed with this utility is a udev rule file that speeds up
+the process by avoiding an automatic mount.
 
- The "Capt'ns Missing Link" people also suggest doing
-   modprobe -r usb-storage && modprobe usb-storage quirks=483:3744:l
- or adding the equivalent to /etc/modprobe.conf or /etc/modprobe.d/local.conf
-    options usb-storage quirks=483:3744:l
+The "Capt'ns Missing Link" people also suggest doing
+  modprobe -r usb-storage && modprobe usb-storage quirks=483:3744:l
+or adding the equivalent to /etc/modprobe.conf or /etc/modprobe.d/local.conf
+  options usb-storage quirks=483:3744:l
