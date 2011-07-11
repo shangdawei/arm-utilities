@@ -1016,11 +1016,82 @@ int stl_fread(struct stlink* sl, const char* path,
 }
 
 
+#if 0
+/* Verify that ARM memory starting at ADDR matches the next chunk from FD.
+ * Return the number of bytes successfully compared, zero if finished,
+ * or -1 if a mismatch occured.
+ */
+
+int stlink_verify_chunk(struct stlink* sl, int fd, stm32_addr_t addr)
+{
+	char filebuf[128*1024], flashbuf[128*1024];
+	ssize_t file_rdsize, flash_rdsize;
+
+	file_rdsize = read(fd, filebuf, sizeof filebuf);
+	if (size < 0) {
+		fprintf(stderr, " Failed to read file '%s' during verify: %s\n",
+				path, strerror(errno));
+		return -1;
+		}
+		if (size == 0)
+			return 0;
+
+		flash_rdsize = stl_read(sl, addr, flashbuf, file_rdsize);
+		/* Unlikely, but check anyway. */
+		if (flash_rdsize != file_rdsize) {
+			fprintf(stderr, " Mismatched read size during verify, %d vs %d.\n",
+					flash_rdsize, file_rdsize);
+			return -1;
+		}
+
+		/* Extremely uninformative about the failure. */
+		if (memcmp(filebuf, flashbuf, file_rdsize) != 0) {
+			fprintf(stderr, " Failed flash verify.\n");
+			return -1;
+		}
+		addr += file_rdsize;
+	}
+#endif
+
 /* Verify that ARM memory starting at ADDR matches the contents of file PATH. */
 int stlink_fverify(struct stlink* sl, const char* path,
 						stm32_addr_t addr)
 {
+	char filebuf[128*1024], flashbuf[128*1024];
+	ssize_t file_rdsize, flash_rdsize;
+	const int fd = open(path, O_RDONLY);
+
+	if (fd < 0) {
+		fprintf(stderr, " Failed to open '%s': %s\n", path, strerror(errno));
+		return -1;
+	}
+
+	while ((file_rdsize = read(fd, filebuf, sizeof filebuf)) > 0) {
+		flash_rdsize = stl_read(sl, addr, flashbuf, file_rdsize);
+		/* Unlikely, but check anyway. */
+		if (flash_rdsize != 0 && flash_rdsize != file_rdsize) {
+			fprintf(stderr, " Mismatched read size during verify, %d vs %d.\n",
+					flash_rdsize, file_rdsize);
+			goto fail;
+		}
+
+		/* Extremely uninformative about the failure. */
+		if (memcmp(filebuf, flashbuf, file_rdsize) != 0) {
+			fprintf(stderr, " Failed flash verify.\n");
+			goto fail;
+		}
+		addr += file_rdsize;
+	}
+	if (file_rdsize < 0) {
+		fprintf(stderr, " Failed to read file '%s' during verify: %s\n",
+				path, strerror(errno));
+		goto fail;
+	}
+	close(fd);
 	return 0;
+ fail:
+	close(fd);
+	return -1;
 }
 
 #if 0
@@ -1387,6 +1458,7 @@ int main(int argc, char *argv[])
 			char *path = cmd + 8;
 			uint32_t flash_base = stm_devids[0].flash_base;
 			uint32_t flash_size = stm_devids[0].flash_size;
+			int res;
 			/* Write the user flash area. */
 			fprintf(stderr, " Writing program from %s into STM32 memory at "
 					"0x%8.8x.\n", path, flash_base);
@@ -1395,6 +1467,11 @@ int main(int argc, char *argv[])
 			stl_flash_erase_page(sl, 0xa11);
 			stl_flash_erase_page(sl, 0xa11);
 			stl_flash_fwrite(sl, path, flash_base, flash_size);
+			printf(" Verifying flash write...");
+			fflush(stdout);
+			res = stlink_fverify(sl, path, flash_base);
+			printf("file %s %s flash contents\n", path,
+				   res == 0 ? "matched" : "did not match");
 		} else if (strncmp("read", cmd, 4) == 0) {
 			/* Read memory location */
 			int memaddr = strtoul(cmd+4, 0, 0); /* Super sleazy */
