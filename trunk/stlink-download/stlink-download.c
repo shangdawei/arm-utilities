@@ -5,6 +5,7 @@
   and STM32VLDiscovery devices.
 
   Written December 2010 by Donald Becker and William Carlson.
+  MS-Windows support July 2011 by Anton Eltchaninov
   This program may be used under the terms of the Gnu General Public License,
   (GPL) v2 or v3.  Distribution under other terms requires an explicit
   license from the authors.
@@ -71,20 +72,34 @@ Usage notes:
 #include <stdio.h>
 #include <string.h>
 #include <getopt.h>
-#include <sys/ioctl.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+
+#if defined(__linux__)
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <scsi/sg.h>
+
+#elif defined(__ms_windows__)
+#include <windows.h>
+enum SCSI_Generic_Direction {SG_DXFER_TO_DEV=0, SG_DXFER_FROM_DEV=1};
+
+#else
+#error "No host OS defined."
+#endif
 
 /* $Vbase: 1.54 14 January 2011 00:25:11 becker$ */
 static const char version_msg[] =
 "STLink programmer/debugging utility $Id$  Copyright Donald Becker";
 
 static const char usage_msg[] =
+#if defined(__ms_windows__)
+ 	"\nUsage: %s \\\\.\\E: <command> ...\n\n"
+#else
 	"\nUsage: %s /dev/sg0 <command> ...\n\n"
+#endif
 	"Commands are:\n"
 	"  info version blink\n"
 	"  debug reg<regnum> wreg<regnum>=<value> regs reset run step status\n"
@@ -186,7 +201,7 @@ struct stm_chip_params {			/* Unused/placeholder parameter table. */
 
 /* The maximum data transfer seems to be about 6KB, likely limited by
  * the RAM on the STLink 32F103 chip.  This is not a painful limit.  There
- * is usually only 4KB or 8KB of RAM on the target chip.  The only 
+ * is usually only 4KB or 8KB of RAM on the target chip.  The only
  * use for larger transfer is reading or verifying flash.
  * When we iterate for large transfers, we are often conservative and
  * avoid pushing the size limits.  There is little point to finding the
@@ -265,6 +280,7 @@ struct ARMcoreRegs {
 	uint32_t rw2;				/* Hmmm, is this returned? Here just in case. */
 } __attribute__((packed));
 
+/* The packed-field version information. */
 struct STLinkVersion {
 	unsigned int STLink_ver:4;
 	unsigned int JTAG_ver:6;
@@ -278,7 +294,11 @@ typedef uint32_t stm32_addr_t;
 
 struct stlink {
 	const char *dev_path;
+#if defined(__ms_windows__)
+	HANDLE fd;
+#else
 	int fd;
+#endif
 	int verbose;				/* A local copy of 'verbose'. */
 
 	int chip_index;				/* Index into chip table (below). */
@@ -361,8 +381,22 @@ struct stlink global_stlink;		/* Yes, there can be only one. */
  * The program expects to open a SCSI Generic device, but
  * we do not verify that we have opened such a device.
  */
-struct stlink *stl_init(struct stlink *sl, const char *dev_name, int fd)
+struct stlink *stl_init(struct stlink *sl, const char *dev_name)
 {
+#if defined(__ms_windows__)
+	HANDLE fd = CreateFile(dev_name, GENERIC_READ | GENERIC_WRITE,
+						FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+						OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+#else
+	int fd = open(dev_name, O_RDWR);
+#endif
+
+	if (sl->fd < 0) {
+		fprintf(stderr, "Failed to open STLink device %s: %s.\n",
+				dev_name, strerror(errno));
+		return NULL;
+	}
+
 	memset(sl, 0, sizeof *sl);
 	sl->dev_path = dev_name;
 	sl->fd = fd;
@@ -384,7 +418,11 @@ struct stlink *stl_init(struct stlink *sl, const char *dev_name, int fd)
  * We are always exiting and thus do not need to free any structures. */
 void stl_close(struct stlink *sl)
 {
+#if defined(__ms_windows__)
+	CloseHandle(sl->fd);
+#else
 	close(sl->fd);
+#endif
 }
 
 /* Execute a general command, with arbitrary parameters.
@@ -459,7 +497,7 @@ int stlink_cmd(struct stlink *sl, uint8_t st_cmd1, uint8_t st_cmd2, int q_len)
 /* Basic target memory read and write functions.
  * Both bulk and single 32 bit word functions are here.
  * The bulk version has the caller uses the SCSI buffer.
- * The 32 bit versions use function parameter and return data. 
+ * The 32 bit versions use function parameter and return data.
  */
 /* Write to the ARM memory starting at ADDR for LEN bytes.
  * The *_mem8 variant has a maximum LEN of 64 bytes.
@@ -511,6 +549,7 @@ static inline uint32_t sl_rd32(struct stlink *sl, uint32_t addr)
 	return *(uint32_t*)sl->q_buf;
 }
 
+#if defined(linux)
 /* Enqueue a command to the SCSI Generic driver.
  * Most of the work is filling in the struct sg_io_hdr.
  */
@@ -553,6 +592,8 @@ int stl_do_scsi_op(struct stlink *stl, int sg_xfer_dir)
 	}
 	return ret;
 }
+#elif defined(MS_WINDOWS)
+#endif
 
 static void stl_print_version(struct STLinkVersion *ver)
 {
@@ -1160,7 +1201,11 @@ int stl_kick_mode(struct stlink *sl)
 	 * to mass storage mode.  This is super painful and slow. */
 	fprintf(stderr, "\nAttempting to switch the STLink to a known mode...\n");
 	stl_exit_dfu_mode(sl);
+#if defined(__ms_windows__)
+	CloseHandle(sl->fd);
+#else
 	close(sl->fd);
+#endif
 	/* If this worked, the device has reset and disconnected.
 	 * A disconnect lasts for several seconds.
 	 * Give the kernel time to handle the fresh plug event.
@@ -1358,7 +1403,7 @@ int main(int argc, char *argv[])
 	int fd;
 	struct stlink *sl;
 
-    program = rindex(argv[0], '/') ? rindex(argv[0], '/') + 1 : argv[0];
+    program = strrchr(argv[0], '/') ? strrchr(argv[0], '/') + 1 : argv[0];
 
 	while ((c = getopt_long(argc, argv, short_opts, long_options, 0)) != -1) {
 		switch (c) {
@@ -1381,6 +1426,8 @@ int main(int argc, char *argv[])
     }
 
 	dev_name = argv[optind];
+	sl = &global_stlink;
+	sl = stl_init(sl, dev_name);
 
 	fd = open(dev_name, O_RDWR);
 	if (fd < 0) {
@@ -1389,8 +1436,7 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
-	sl = &global_stlink;
-	sl = stl_init(sl, dev_name, fd);
+
 
 	stl_get_version(sl);
 	sl->ver = *(struct STLinkVersion *)sl->q_buf;
