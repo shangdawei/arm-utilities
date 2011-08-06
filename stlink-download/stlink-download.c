@@ -98,7 +98,7 @@ static const char usage_msg[] =
 #if defined(__ms_windows__)
  	"\nUsage: %s \\\\.\\E: <command> ...\n\n"
 #else
-	"\nUsage: %s /dev/sg0 <command> ...\n\n"
+	"\nUsage: %s [/dev/stlink] <command> ...\n\n"
 #endif
 	"Commands are:\n"
 	"  info version blink\n"
@@ -1395,9 +1395,9 @@ static void stm_show_CAN(struct stlink* sl, unsigned int can_num)
 
 int main(int argc, char *argv[])
 {
-    char *program;		/* Program name without path. */
+    char *program;				/* Program name without path. */
     int c, errflag = 0;
-	char *dev_name;				/* Path of SCSI device e.g. "/dev/sg1" */
+	char *dev_name;				/* Path of SCSI device e.g. "/dev/stlink" */
 	char *upload_path = 0, *download_path = 0, *verify_path = 0;
 	int do_blink = 0;
 	int fd;
@@ -1425,7 +1425,14 @@ int main(int argc, char *argv[])
 		return errflag ? 1 : 2;
     }
 
-	dev_name = argv[optind];
+	if (strncmp(argv[optind], "/dev/", 5) == 0) {
+		dev_name = argv[optind++];
+	} else {
+		if (verbose)
+			fprintf(stderr, "Using the default device /dev/stlink.\n");
+		dev_name = "/dev/stlink";
+	}
+
 	sl = &global_stlink;
 	sl = stl_init(sl, dev_name);
 
@@ -1480,7 +1487,7 @@ int main(int argc, char *argv[])
 		stl_fread(sl, upload_path, sl->sys_base, sl->sys_size);
 	}
 #endif
-	while (argv[++optind]) {
+	while (argv[optind]) {
 		char *cmd = argv[optind];
 		if (verbose) printf("Executing command %s.\n", argv[optind]);
 
@@ -1628,6 +1635,7 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "Unrecognized command '%s'.\n", cmd);
 			break;
 		}
+		optind++;
 	}
 
 	/* A list of the features/bugs that I still need to check.
