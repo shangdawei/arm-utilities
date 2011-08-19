@@ -116,10 +116,15 @@ void USART3_IRQHandler(void) INTR_HAND_ATTRIBUTES;
 void EXTI15_10(void) INTR_HAND_ATTRIBUTES;
 void RTC_Alarm(void) INTR_HAND_ATTRIBUTES;
 void CEC_IRQHandler(void) INTR_HAND_ATTRIBUTES;
+void USBWakeUp_IRQHandler(void)	__attribute__((alias("CEC_IRQHandler")));
 void TIM12_IRQHandler(void) INTR_HAND_ATTRIBUTES;
 void TIM13_IRQHandler(void) INTR_HAND_ATTRIBUTES;
 void TIM14_IRQHandler(void) INTR_HAND_ATTRIBUTES;
+void TIM8_CC_IRQHandler(void) INTR_HAND_ATTRIBUTES;
+void ADC3_IRQHandler(void) INTR_HAND_ATTRIBUTES;
 void FSMC_IRQHandler(void) INTR_HAND_ATTRIBUTES;
+void SDIO_IRQHandler(void) INTR_HAND_ATTRIBUTES;
+void USB_OTG_FS_WKUP_IRQHandler(void) __attribute__((alias("SDIO_IRQHandler")));
 void TIM5_IRQHandler(void) INTR_HAND_ATTRIBUTES;
 void SPI3_IRQHandler(void) INTR_HAND_ATTRIBUTES;
 void UART4_IRQHandler(void) INTR_HAND_ATTRIBUTES;
@@ -185,11 +190,11 @@ __attribute__ ((section("vectors")))= {
   USART1_IRQHandler, USART2_IRQHandler, USART3_IRQHandler,
   EXTI15_10,
   RTC_Alarm,
-  CEC_IRQHandler,
+  CEC_IRQHandler,				/* #42: Aliased to USBWakeUp_IRQHandler */
   TIM12_IRQHandler, TIM13_IRQHandler, TIM14_IRQHandler,
-  0,0,							/* 64 */
+  TIM8_CC_IRQHandler, ADC3_IRQHandler,
   FSMC_IRQHandler,
-  0,
+  USB_OTG_FS_WKUP_IRQHandler,	/* #49: Aliased to SDIO_IRQHandler */
   TIM5_IRQHandler, SPI3_IRQHandler, UART4_IRQHandler, UART5_IRQHandler,
   TIM6_DAC_IRQHandler, TIM7_IRQHandler,
   DMA2_Channel1, DMA2_Channel2, DMA2_Channel3, DMA2_Channel4_5, DMA2_Channel5,
