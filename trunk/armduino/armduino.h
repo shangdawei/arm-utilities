@@ -653,8 +653,13 @@ enum STM_Interrupts {
 	I2C1_EV_Intr=31, I2C1_ER_Intr=32,  I2C2_EV_Intr=33, I2C2_ER_Intr=34,
 	SPI1_Intr=35, SPI2_Intr=36,
 	USART1_Intr=37, USART2_Intr=38, USART3_Intr=39,
-	EXTI15_10_Intr=40, RTC_Alarm_Intr=41, CEC_Intr=42,
-	TIM12_Intr=43, TIM13_Intr=44, TIM14_Intr=45, FSMC_Intr=48,
+	EXTI15_10_Intr=40, RTC_Alarm_Intr=41,
+	CEC_Intr=42, USBWakeUp_Intr=42,		/* Alt: USB On-The-Go FS Wakeup */
+	TIM12_Intr=43, TIM13_Intr=44, TIM14_Intr=45,
+	/* Only on some chips. */
+	TIM8_CC_Intr=46, ADC3_Intr=47, 
+	FSMC_Intr=48,
+	SDIO_Intr=49, USB_OTG_FS_WKUP_Intr=49, /* Overlap, dependent on chip */
 	TIM5_Intr=50, SPI3_Intr=51, UART4_Intr=52, UART5_Intr=53,
 	TIM6_DAC_Intr=54, TIM7_Intr=55,
 	DMA2_Channel1_Intr=56, DMA2_Channel2_Intr=57, DMA2_Channel3_Intr=58,
