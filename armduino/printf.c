@@ -22,7 +22,6 @@
 
 #include <stdarg.h>
 #if defined(STM32)
-#define LONG_SZ 8
 #define PGM_P __const void *
 #define pgm_read_byte(addr) (*(const char *)(addr))
 typedef unsigned char uint8_t;
@@ -31,18 +30,30 @@ typedef unsigned short uint16_t;
 typedef signed short int16_t;
 typedef unsigned int uint32_t;
 typedef signed int int32_t;
-#else
+
+#elif defined(SDCC_pic16)
+#include <stdint.h>
+#define inline
+#define __restrict
+#define PGM_P const char *
+#define pgm_read_byte(addr) (*(const char *)(addr))
+
+#elif defined(__AVR)
 #include <avr/pgmspace.h>
-#define LONG_SZ 4
+
+#else
+#warning "Processor type undefined."
+#define PGM_P const char *
+#define pgm_read_byte(addr) (*(const char *)(addr))
 #endif
 
 /* Send a character to the output device.
  * Put any output-redirect hook here.
  */
-unsigned char uart_putch(char c);
+unsigned char uart_putchar(char c);
 static void inline serial_putch(char c)
 {
-	while(uart_putch(c) != 0)	/* Returns -1 if full queue.  We busy-wait. */
+	while(uart_putchar(c) != 0)	/* Returns -1 if full queue.  We busy-wait. */
 		;
 }
 
@@ -70,7 +81,7 @@ void u32_to_uart(uint32_t val, int digits)
 }
 
 /* Same thing in hex. */
-void u16x_to_uart(unsigned val, unsigned char digits)
+void uint_to_hex_uart(unsigned val, unsigned char digits)
 {
 	unsigned char nibble;
 	char *str = buf + sizeof(buf) - 1;
@@ -88,13 +99,13 @@ void u16x_to_uart(unsigned val, unsigned char digits)
 	} while (*++str);
 }
 
-int printf(const PGM_P __restrict format, ...);
+int serprintf(const PGM_P __restrict format, ...);
 
-int serprintf(PGM_P format, ...)
+int serprintf(const PGM_P format, ...)
 {
 	va_list args;
-	va_start(args, format);
 	uint8_t c, j = 0;
+	va_start(args, format);
 
 	while ((c = pgm_read_byte(format++))) {
 		if (j) {
@@ -121,12 +132,14 @@ int serprintf(PGM_P format, ...)
 				} while (1);
 				break;
 			}
-			case 'l':  j = LONG_SZ;  continue;
+			case 'l':  j = sizeof(long);  continue;
 			case 'u':
-				u32_to_uart(va_arg(args, uint32_t), j);
+				u32_to_uart(j == sizeof(long) ? va_arg(args, long) :
+							va_arg(args, int), j);
 				break;
 			case 'd': {
-				int32_t val = va_arg(args, uint32_t);
+				int32_t val = (j == sizeof(long) ? va_arg(args, long) :
+							   va_arg(args, int));
 				if (val < 0) {
 					serial_putch('-');
 					val = -val;
@@ -139,9 +152,12 @@ int serprintf(PGM_P format, ...)
 				break;
 			case 'x':
 			case 'X': {
-				serial_putch('0'); /* Do "%#x" rather than "%x" */
-				serial_putch(c);
-				u16x_to_uart(va_arg(args, uint32_t), j);
+				if (j == 1) {		/* Do "%#x" rather than "%x" */
+					serial_putch('0');
+					serial_putch(c);		/* Match case 0x or 0X */
+				}
+				uint_to_hex_uart(j == sizeof(long) ? va_arg(args, long) :
+								 va_arg(args, int), j);
 				break;
 			}
 			default:
