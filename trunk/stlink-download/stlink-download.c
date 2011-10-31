@@ -533,10 +533,16 @@ static inline void sl_wr32(struct stlink* sl, uint32_t addr, uint32_t val)
  */
 uint32_t stl_rd32_cmd(struct stlink* sl, uint32_t addr, uint16_t len)
 {
-#if 0
+#if 1
+	/* This version forces alignment, which should never be needed as
+	 * calls always pass the correct alignment and size. */
 	write_uint32(sl->scsi_cmd_blk + 2, addr & ~3);
 	write_uint16(sl->scsi_cmd_blk + 6, (len+3) & ~3);
 #else
+	/* This version adds one to compensate for a STLink bug that causes
+	 * a residue error.  However it causes incorrect results with some
+	 * combinations of kernel and virtual machine hypervisors.
+	 */
 	write_uint32(sl->scsi_cmd_blk + 2, addr);
 	write_uint16(sl->scsi_cmd_blk + 6, len+1);
 #endif
@@ -1293,6 +1299,25 @@ static void stm_discovery_blink(struct stlink* sl)
 		sl_wr32(sl, GPIOC_CRH, PortC_hi_iocfg);
 	return;
 }
+
+#if 0
+/* Set an interrupt to pending.  This should be used with caution as some
+ * interrupt handlers expect only hardware events e.g. a serial character
+ * has arrived. */
+/* Bitmap, must write as 32 bit word */
+const int IntrSetPendingBase = 0xE000E200;
+
+static void stm_raise_irq(struct stlink* sl, int irq_num)
+{
+	if (irq_num > 248) {
+		printf("Invalid interrupt number %d.  Cannot set pending.\n", irq_num);
+		return;
+	}
+	sl_wr32(sl, IntrSetPendingBase + ((irq_num & 0xE0)>>3),
+			1 << (irq_num & 0x1F));
+	return;
+}
+#endif
 
 uint32_t timer_addr_map[] = {
 	0, 0x40012C00, 0x40000000, 0x40000400, 0x40000800, 0x40000C00, /* 0-5 */
