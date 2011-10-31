@@ -2,7 +2,7 @@
 # Makefile rules for the stlink-download utility.
 # Written 2010,2011 by Donald Becker and William Carlson
 
-PRGS := stlink-download
+PRGS := stlink-download stlinkv2-util
 DEV := /dev/stlink
 
 all: $(PRGS)
@@ -17,6 +17,7 @@ ARMCFLAGS = -Os -fconserve-stack -fcaller-saves -mcpu=cortex-m3 -mthumb \
 ARMCFLAGS+= -Wa,-adhlns=$(<:.c=.lst)
 
 stlink-download: stlink-download.c
+stlinkv2-util: stlinkv2-util.c
 
 flash-transfer.lst: flash-transfer.c
 	$(ARMCC) $(ARMCFLAGS) -c $< -Wa,-adhlns=$(<:.c=.lst)
@@ -24,7 +25,7 @@ flash-transfer.lst: flash-transfer.c
 # You will likely need root permission to do this e.g. sudo
 install: stlink-download
 	install -C -o root -g root -m 644 10-stlink.rules /etc/udev/rules.d/
-	install -m 755 stlink-download /usr/bin/
+	install -m 755 $(PRGS) /usr/bin/
 
 tar: stlink.tgz
 stlink.tgz: Makefile 10-stlink.rules stlink-download.c flash-transfer.c
