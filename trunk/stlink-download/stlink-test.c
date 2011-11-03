@@ -3,6 +3,7 @@
   This program interacts with the STMicro STLink USB interface for STM8
   and STM32 devices.
 
+
   Portions of this code were informed by the stlink-access-test.c code.
   It carried the following self-contradictory notice:
   Copyright (c) 2010 "Capt'ns Missing Link" Authors. All rights reserved.
