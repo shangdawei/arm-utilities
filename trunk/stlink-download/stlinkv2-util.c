@@ -87,6 +87,8 @@ Usage notes:
 #include <windows.h>
 enum SCSI_Generic_Direction {SG_DXFER_TO_DEV=0, SG_DXFER_FROM_DEV=1};
 
+#elif defined(__APPLE__)
+#include <libusb-1.0/libusb.h>
 #else
 #error "No host OS defined."
 #endif
@@ -309,6 +311,9 @@ struct stlink {
 #if defined(__ms_windows__)
 	HANDLE fd;
 #elif defined(__linux__)
+	int fd;
+	libusb_device_handle *usb_hand;
+#elif defined(__APPLE__)
 	int fd;
 	libusb_device_handle *usb_hand;
 #else
