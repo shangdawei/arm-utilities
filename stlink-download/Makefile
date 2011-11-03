@@ -18,6 +18,7 @@ ARMCFLAGS+= -Wa,-adhlns=$(<:.c=.lst)
 
 stlink-download: stlink-download.c
 stlinkv2-util: stlinkv2-util.c
+	$(CC) $(CFLAGS) -o $@ $< -lusb-1.0
 
 flash-transfer.lst: flash-transfer.c
 	$(ARMCC) $(ARMCFLAGS) -c $< -Wa,-adhlns=$(<:.c=.lst)
