@@ -89,6 +89,9 @@ enum SCSI_Generic_Direction {SG_DXFER_TO_DEV=0, SG_DXFER_FROM_DEV=1};
 
 #elif defined(__APPLE__)
 #include <libusb-1.0/libusb.h>
+// The following hack so it might get a little further in compile!
+#define SG_DXFER_TO_DEV 0
+#define SG_DXFER_FROM_DEV 1
 #else
 #error "No host OS defined."
 #endif
