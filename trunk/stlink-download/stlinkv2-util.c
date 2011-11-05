@@ -1,18 +1,21 @@
-/* STLink download/debug interface for Linux. */
+/* STLink v2 download/debug interface for Linux. */
 /*
   This program interacts with the STMicro USB STLink programming/debug
   interface for STMicro microcontrollers.  The STLink is found on STM8
-  and STM32VLDiscovery devices.
+  and STM32 Discovery devices.
 
   Written December 2010 by Donald Becker and William Carlson.
   MS-Windows support July 2011 by Anton Eltchaninov
+  Apple OS-X support November 2011 by William Carlson
   This program may be used under the terms of the Gnu General Public License,
   (GPL) v2 or v3.  Distribution under other terms requires an explicit
   license from the authors.
 
-  The communication is based on standard USB mass storage device, with
-  its SCSI command protocol. The STLink operations encapsulated in
-  vendor-specific SCSI commands.
+  The v1 protocol is encapsulted in the standard USB mass storage device
+  protocol, which is a simple SCSI command protocol. The STLink operations
+  are encapsulated in vendor-specific SCSI commands.
+
+  The v2 protocol directly uses USB bulk endpoints.
 
   We directly use the SCSI Generic (sg) ioctl() and data structures to
   communicate with the STLink.  The alternative of using the
@@ -85,13 +88,9 @@ Usage notes:
 
 #elif defined(__ms_windows__)
 #include <windows.h>
-enum SCSI_Generic_Direction {SG_DXFER_TO_DEV=0, SG_DXFER_FROM_DEV=1};
 
 #elif defined(__APPLE__)
 #include <libusb-1.0/libusb.h>
-// The following hack so it might get a little further in compile!
-#define SG_DXFER_TO_DEV 0
-#define SG_DXFER_FROM_DEV 1
 #else
 #error "No host OS defined."
 #endif
@@ -188,16 +187,27 @@ struct stm_chip_params {			/* Unused/placeholder parameter table. */
 #define USB_STLINK_PID	0x3744
 #define USB_STLINKv2_PID	0x3748
 
+/* Commands specify a size and direction of additional data.
+ * We use the same mapping as SCSI Generic.
+ * {SG_DXFER_TO_DEV=0, SG_DXFER_FROM_DEV=1};
+ */
+enum STLinkParamDirection {
+	STLinkParamToDev=0, STLinkParamFromDev=1,
+};
+
+/* A command should complete in well under one second. Most take a few
+ * milliseconds, with a more complex ones taking about 250 ms.
+ */
+#define TIMEOUT_MSEC	800
+
 /* The v1 device presents itself as a USB mass storage device.  Debug access
  * is through additional SCSI Command Descriptor Blocks (CDB) commands.
  *  http://en.wikipedia.org/wiki/SCSI_CDB
  * We access these with the SCSI Generic (SG) mechanism.
- * The STLink appears to always use a 10 byte CDB.
- * A command should complete in well under one second. Most take a few
- * milliseconds, with a more complex ones taking about 250 ms.
+ * The STLink appears to always use a 10 byte CDB, so we use that as the
+ * buffer size for both v1 and v2.
  */
 #define CDB_SIZE		10
-#define SG_TIMEOUT_MSEC	800
 
 /* The SCSI Request Sense command is used to obtain sense data
  * (error information) from the target.
@@ -334,14 +344,14 @@ struct stlink {
 	struct ARMcoreRegs reg;
 
 	/* Parameters for the SCSI data transfer blocks. */
-	unsigned char scsi_cmd_blk[CDB_SIZE];
-	/* Sense (error information) data */
-	unsigned char sense_buf[SENSE_BUF_LEN];
-	int q_len;
-	unsigned char q_buf[Q_BUF_LEN];
+	enum STLinkParamDirection xfer_dir;
+	int cmd_len;
+	unsigned char cmd_buf[CDB_SIZE];
+	int data_len;
+	unsigned char data_buf[Q_BUF_LEN];
 };
 
-int stl_do_scsi_op(struct stlink *stl, int sg_xfer_dir);
+int stl_do_cmd(struct stlink *stl);
 
 // Endianness
 // http://www.ibm.com/developerworks/aix/library/au-endianc/index.html
@@ -449,40 +459,46 @@ void stl_close(struct stlink *sl)
 }
 
 /* Execute a general command, with arbitrary parameters.
- * The command has already been written into sl->scsi_cmd_blk[]. */
-void st_gcmd(struct stlink *sl, uint8_t st_cmd0, uint8_t st_cmd1, int q_len)
+ * This is only used for STLink device commands, not for target commands.
+ */
+void st_gcmd(struct stlink *sl, uint8_t st_cmd0, uint8_t st_cmd1, int resp_len)
 {
-	sl->scsi_cmd_blk[0] = st_cmd0;
-	sl->scsi_cmd_blk[1] = st_cmd1;
-	sl->q_len = q_len;
-	stl_do_scsi_op(sl, SG_DXFER_FROM_DEV);
+	sl->cmd_buf[0] = st_cmd0;
+	sl->cmd_buf[1] = st_cmd1;
+	sl->cmd_len = 2;
+	sl->data_len = resp_len;
+	sl->xfer_dir = STLinkParamFromDev;
+	stl_do_cmd(sl);
 	return;
 }
 
 #define stl_get_version(sl) st_gcmd(sl, STLinkGetVersion, 0, 6)
 #define stl_mode(sl) (st_gcmd(sl, STLinkGetCurrentMode, 0, 2), \
-					  *(uint16_t *)sl->q_buf)
+					  *(uint16_t *)sl->data_buf)
 #define stl_exit_dfu_mode(sl) \
 	st_gcmd(sl, STLinkDFUCommand, STLinkDFUModeExit, 0)
 
 /* Execute a regular-form STLink Debug command.
  * This is the generic operation for most simple commands.
  */
-int stlink_cmd(struct stlink *sl, uint8_t st_cmd1, uint8_t st_cmd2, int q_len)
+int stlink_cmd(struct stlink *sl, uint8_t st_cmd1, uint8_t st_cmd2,
+			   int resp_len)
 {
 #if 0
-	memset(sl->scsi_cmd_blk, 0x55, sizeof(sl->scsi_cmd_blk));
+	memset(sl->cmd_buf, 0x55, sizeof(sl->cmd_buf));
 #endif
-	sl->scsi_cmd_blk[0] = STLinkDebugCommand;
-	sl->scsi_cmd_blk[1] = st_cmd1;
-	sl->scsi_cmd_blk[2] = st_cmd2;
-	sl->q_len = q_len;
-	memset(sl->q_buf, 0x55555555, q_len+12); /* Debugging only */
-	stl_do_scsi_op(sl, SG_DXFER_FROM_DEV);
-	if (q_len == 2)
-		return *(uint16_t *)sl->q_buf;
-	else if (q_len == 4)
-		return read_uint32(sl->q_buf, 0);
+	sl->cmd_buf[0] = STLinkDebugCommand;
+	sl->cmd_buf[1] = st_cmd1;
+	sl->cmd_buf[2] = st_cmd2;
+	sl->cmd_len = 16;			/* Should be the actual length */
+	sl->data_len = resp_len;
+	sl->xfer_dir = STLinkParamFromDev;
+	memset(sl->data_buf, 0x55555555, resp_len+12); /* Debugging only */
+	stl_do_cmd(sl);
+	if (resp_len == 2)
+		return *(uint16_t *)sl->data_buf;
+	else if (resp_len == 4)
+		return read_uint32(sl->data_buf, 0);
 	return 0;
 }
 
@@ -504,15 +520,15 @@ int stlink_cmd(struct stlink *sl, uint8_t st_cmd1, uint8_t st_cmd2, int q_len)
 #define stl_get_reg(sl, reg_idx) \
 	stlink_cmd(sl, STLinkDebugReadOneReg, (reg_idx), 4)
 
-/* These need extra data. */
+/* These commands need additional parameters. */
 #define stl_write_reg(sl, reg_val, reg_idx)	{			\
-		write_uint32(sl->scsi_cmd_blk + 3, (reg_val));		\
+		write_uint32(sl->cmd_buf + 3, (reg_val));		\
 		stlink_cmd(sl, STLinkDebugWriteReg, (reg_idx), 2);  \
 	}
 #define stl_set_fp(sl, fp_nr)  stlink_cmd(sl, STLinkDebugSetFP, fp_nr, 2)
 #define stl_set_breakpoint1(sl, fp_nr, addr, fptype) (	\
-	write_uint32(sl->scsi_cmd_blk+3, addr),			\
-	sl->scsi_cmd_blk[7] = fptype,							\
+	write_uint32(sl->cmd_buf+3, addr),			\
+	sl->cmd_buf[7] = fptype,							\
 	stlink_cmd(sl, STLinkDebugSetFP, fp_nr, 2))
 
 #define is_core_halted(sl)  (stl_get_status(sl) == STLINK_CORE_HALTED)
@@ -528,23 +544,24 @@ int stlink_cmd(struct stlink *sl, uint8_t st_cmd1, uint8_t st_cmd2, int q_len)
  */
 static inline int stl_wr32_cmd(struct stlink* sl, uint32_t addr, uint16_t len)
 {
-	sl->scsi_cmd_blk[0] = STLinkDebugCommand;
+	sl->cmd_buf[0] = STLinkDebugCommand;
 	if ((len & 3) == 0)
-		sl->scsi_cmd_blk[1] = STLinkDebugWriteMem32bit;
+		sl->cmd_buf[1] = STLinkDebugWriteMem32bit;
 	else if (len < 64)
-		sl->scsi_cmd_blk[1] = STLinkDebugWriteMem8bit;
+		sl->cmd_buf[1] = STLinkDebugWriteMem8bit;
 	else
 		return -1;
-	write_uint32(sl->scsi_cmd_blk + 2, addr);
-	write_uint16(sl->scsi_cmd_blk + 6, len);
-	sl->q_len = len;
-
-	stl_do_scsi_op(sl, SG_DXFER_TO_DEV);
+	write_uint32(sl->cmd_buf + 2, addr);
+	write_uint16(sl->cmd_buf + 6, len);
+	sl->cmd_len = 8;
+	sl->data_len = len;
+	sl->xfer_dir = STLinkParamToDev;
+	stl_do_cmd(sl);
 	return 0;
 }
 static inline void sl_wr32(struct stlink* sl, uint32_t addr, uint32_t val)
 {
-	write_uint32(sl->q_buf, val);
+	write_uint32(sl->data_buf, val);
 	stl_wr32_cmd(sl, addr, sizeof(uint32_t));
 }
 
@@ -559,57 +576,61 @@ uint32_t stl_rd32_cmd(struct stlink* sl, uint32_t addr, uint16_t len)
 #if 1
 	/* This version forces alignment, which should never be needed as
 	 * calls always pass the correct alignment and size. */
-	write_uint32(sl->scsi_cmd_blk + 2, addr & ~3);
-	write_uint16(sl->scsi_cmd_blk + 6, (len+3) & ~3);
+	write_uint32(sl->cmd_buf + 2, addr & ~3);
+	write_uint16(sl->cmd_buf + 6, (len+3) & ~3);
 #else
 	/* This version adds one to compensate for a STLink bug that causes
 	 * a residue error.  However it causes incorrect results with some
 	 * combinations of kernel and virtual machine hypervisors.
 	 */
-	write_uint32(sl->scsi_cmd_blk + 2, addr);
-	write_uint16(sl->scsi_cmd_blk + 6, len+1);
+	write_uint32(sl->cmd_buf + 2, addr);
+	write_uint16(sl->cmd_buf + 6, len+1);
 #endif
 	stlink_cmd(sl, STLinkDebugReadMem32bit, addr, len);
-	return *(uint32_t*)sl->q_buf;
+	return *(uint32_t*)sl->data_buf;
 }
 static inline uint32_t sl_rd32(struct stlink *sl, uint32_t addr)
 {
 	stl_rd32_cmd(sl, addr, sizeof(uint32_t));
-	return *(uint32_t*)sl->q_buf;
+	return *(uint32_t*)sl->data_buf;
 }
 
-#if 1
-/* Enqueue a command to the v2 USB link.
- * This still has the dropping from the v1 SCSI transport.
+#if 1							/* Force libusb-1.0 transport during devel */
+/* Enqueue a command to the STLink.
+ * v1 uses SCSI transport over USB.
+ * v2 uses USB bulk endpoints.
+ * stl->cmd_buf
+ * stl->data_buf, stl->data_len
  */
-int stl_do_scsi_op(struct stlink *stl, int sg_xfer_dir)
+int stl_do_cmd(struct stlink *stl)
 {
 	int ret, actual_xfer_len;
 
 	if (stl->verbose > 3)
-		printf("Transfer starting, length %d %p.\n", stl->q_len,
+		printf("Transfer starting, length %d %p.\n", stl->data_len,
 			   stl->usb_hand);
 
-	if (sg_xfer_dir == SG_DXFER_FROM_DEV) {
-		ret = libusb_bulk_transfer
-			(stl->usb_hand, USB_PIPE_OUT,
-			 stl->scsi_cmd_blk, 16, &actual_xfer_len, USB_TIMEOUT_MSEC);
+	/* Should use stl->cmd_len, but we send a fixed 16 bytes. */
+	ret = libusb_bulk_transfer(stl->usb_hand, USB_PIPE_OUT,
+							   stl->cmd_buf, 16, &actual_xfer_len,
+							   USB_TIMEOUT_MSEC);
+	if (stl->verbose > 3)
+		printf("Sent command, status %d length %d.\n", ret, actual_xfer_len);
+
+	if (stl->xfer_dir == STLinkParamFromDev) {
+		ret = libusb_bulk_transfer(stl->usb_hand, USB_PIPE_IN,
+								   stl->data_buf, stl->data_len,
+								   &actual_xfer_len, USB_TIMEOUT_MSEC);
 		if (stl->verbose > 3)
-			printf("Sent command, status %d length %d.\n",
-				   ret, actual_xfer_len);
-		/* Should use stl->q_len */
-		ret = libusb_bulk_transfer
-			(stl->usb_hand, USB_PIPE_IN,
-			 stl->q_buf, stl->q_len, &actual_xfer_len, USB_TIMEOUT_MSEC);
-		if (stl->verbose > 3)
-			printf("Transfer done, status %d length %d.\n",
-				   ret, actual_xfer_len);
+			printf("Transfer done, status %d read length %d of %d.\n",
+				   ret, actual_xfer_len, stl->data_len);
 	} else {
-		ret = libusb_bulk_transfer
-		(stl->usb_hand,
-		 sg_xfer_dir == SG_DXFER_TO_DEV ? USB_PIPE_OUT : USB_PIPE_IN,
-		 stl->q_buf, stl->q_len, &actual_xfer_len, USB_TIMEOUT_MSEC);
-		printf("Transfer done, status %d length %d.\n", ret, actual_xfer_len);
+		ret = libusb_bulk_transfer(stl->usb_hand, USB_PIPE_OUT,
+								   stl->data_buf, stl->data_len,
+								   &actual_xfer_len, USB_TIMEOUT_MSEC);
+		if (stl->verbose > 3)
+			printf("Transfer done, status %d write length %d of %d.\n",
+				   ret, actual_xfer_len, stl->data_len);
 	}
 
 	return ret;
@@ -618,9 +639,11 @@ int stl_do_scsi_op(struct stlink *stl, int sg_xfer_dir)
 /* Enqueue a command to the SCSI Generic driver.
  * Most of the work is filling in the struct sg_io_hdr.
  */
-int stl_do_scsi_op(struct stlink *stl, int sg_xfer_dir)
+int stl_do_cmd(struct stlink *stl)
 {
     struct sg_io_hdr io_hdr = {0,};
+	/* Sense (error information) data */
+	unsigned char sense_buf[SENSE_BUF_LEN];
 	int ret;
 
 	io_hdr.interface_id = 'S';
@@ -630,19 +653,20 @@ int stl_do_scsi_op(struct stlink *stl, int sg_xfer_dir)
 	 * The Request Sense (error info) command is used for responses.
 	 * http://en.wikipedia.org/wiki/SCSI_Request_Sense_Command
 	 */
-	io_hdr.cmdp = stl->scsi_cmd_blk;
-	io_hdr.cmd_len = sizeof(stl->scsi_cmd_blk);
+	io_hdr.cmdp = stl->cmd_buf;
+	io_hdr.cmd_len = sizeof(stl->cmd_buf);
 	io_hdr.sbp = stl->sense_buf;
 	io_hdr.mx_sb_len = sizeof(stl->sense_buf);
 	memset(io_hdr.sbp, 0, io_hdr.sb_len_wr);
 
 	/* Set a buffer to be used for data transferred from/to device */
 	io_hdr.iovec_count = 0;
-	io_hdr.dxferp = stl->q_buf;
-	io_hdr.dxfer_len = stl->q_len;
-	io_hdr.dxfer_direction = sg_xfer_dir;
+	io_hdr.dxferp = stl->data_buf;
+	io_hdr.dxfer_len = stl->data_len;
+	io_hdr.dxfer_direction =
+		(stl->xfer_dir == STLinkParamToDev ? SG_DXFER_TO_DEV:SG_DXFER_FROM_DEV);
 
-	io_hdr.timeout = SG_TIMEOUT_MSEC;
+	io_hdr.timeout = TIMEOUT_MSEC;
 	io_hdr.flags = 0;
 	ret = ioctl(stl->fd, SG_IO, &io_hdr);
 	/* Report SCSI results.  Really, note useful variable if we need
@@ -703,8 +727,8 @@ void stlink_print_arm_regs(struct ARMcoreRegs *regs)
  */
 int stl_set_breakpoint(struct stlink *sl, int fp_nr, uint32_t addr, int fp)
 {
-	write_uint32(sl->q_buf+3, addr);
-	sl->q_buf[7] = fp;
+	write_uint32(sl->data_buf+3, addr);
+	sl->data_buf[7] = fp;
 	return stl_set_fp(sl, fp_nr);
 }
 
@@ -892,9 +916,9 @@ static int stl_loader(struct stlink *sl, stm32_addr_t flash_addr,
 	uint32_t prog_base = stm_devids[0].sram_base;
 	uint32_t *params;
 
-	memcpy(sl->q_buf, db_loader_code, sizeof(db_loader_code));
+	memcpy(sl->data_buf, db_loader_code, sizeof(db_loader_code));
 	offset = sizeof(db_loader_code);
-	params = (uint32_t *)(sl->q_buf+offset);
+	params = (uint32_t *)(sl->data_buf+offset);
 
 	/* Write params[-4] to change the FLASH_REGS_ADDR base.
 	 * Connectivity devices use an offset of +0x40 e.g. 0x40022040
@@ -1031,7 +1055,7 @@ int stl_read(struct stlink* sl, stm32_addr_t addr, void *buf, ssize_t size)
 	if (addr & 3) {
 		int psz = 4 - (addr & 3);
 		stl_rd32_cmd(sl, addr & ~3, sizeof(uint32_t));
-		memcpy(buf, sl->q_buf + (addr & 3), psz);
+		memcpy(buf, sl->data_buf + (addr & 3), psz);
 		offset = psz;
 	}
 	do {
@@ -1043,7 +1067,7 @@ int stl_read(struct stlink* sl, stm32_addr_t addr, void *buf, ssize_t size)
 		stl_rd32_cmd(sl, addr+offset, xfer_size);
 		if (size & 3)
 			xfer_size = size;
-		memcpy(buf + offset, sl->q_buf, xfer_size);
+		memcpy(buf + offset, sl->data_buf, xfer_size);
 		offset += xfer_size;
 		size -= xfer_size;
 	} while (size > 0);
@@ -1225,7 +1249,7 @@ static int stl_fread(struct stlink* sl, const char* path,
 
 		stlink_read_mem32(sl, addr + off, read_size);
 
-		if (write(fd, sl->q_buf, read_size) != (ssize_t)read_size) {
+		if (write(fd, sl->data_buf, read_size) != (ssize_t)read_size) {
 			fprintf(stderr, "write() != read_size\n");
 			close(fd);
 			return -1;
@@ -1338,11 +1362,13 @@ static void stm_discovery_blink(struct stlink* sl)
 	/* Read APB2ENR and APB1ENR at 0x40021018-1F */
 	stl_read(sl, 0x40021018, APBnENR_orig, sizeof APBnENR_orig);
 
+	/* Future: Enable GPIO ports. */
 	APB2ENR_orig = APBnENR_orig[0];  /* 0x40021018 */
 	APB1ENR_orig = APBnENR_orig[1];  /* 0x4002101C (yes, 1 is higher) */
 
 	if (sl->verbose)
-		fprintf(stderr, "GPIOC_CRH = 0x%08x", PortC_hi_iocfg);
+		fprintf(stderr, "GPIOC_CRH = 0x%08x, APB1ENR=%#08x, APB2ENR=%#08x\n",
+				PortC_hi_iocfg, APB1ENR_orig, APB2ENR_orig);
 
 	/* Make certain PC8/PC9 are GPIO outputs -- any speed will do. */
 	if ((PortC_hi_iocfg & 0xCC) != 0x00)
@@ -1386,7 +1412,7 @@ uint32_t timer_addr_map[] = {
 	
 static void stm_show_timer(struct stlink* sl, unsigned int timer_num)
 {
-	uint32_t *result = (void*)sl->q_buf;
+	uint32_t *result = (void*)sl->data_buf;
 	uint32_t timer_addr;
 	char active_map[4] = " H L";
 
@@ -1399,8 +1425,8 @@ static void stm_show_timer(struct stlink* sl, unsigned int timer_num)
 		printf("Invalid timer number.\n");
 		return;
 	}
-	write_uint32(sl->scsi_cmd_blk + 2, timer_addr);
-	write_uint16(sl->scsi_cmd_blk + 6, 81);
+	write_uint32(sl->cmd_buf + 2, timer_addr);
+	write_uint16(sl->cmd_buf + 6, 81);
 	stlink_cmd(sl, STLinkDebugReadMem32bit, timer_addr, 80);
 	printf("Timer %d at %8.8x: %8.8x %8.8x %8.8x %8.8x.\n"
 		   "%8.8x %8.8x %8.8x %8.8x.\n"
@@ -1419,7 +1445,7 @@ uint32_t CAN_addr_map[] = {0, 0x40006400, 0x40006800};
 
 static void stm_show_CAN(struct stlink* sl, unsigned int can_num)
 {
-	uint32_t *result = (void*)sl->q_buf;
+	uint32_t *result = (void*)sl->data_buf;
 	uint32_t mode_map, scale_map, fifo_map, active_map;
 	int i;
 
@@ -1476,7 +1502,6 @@ static void stm_show_CAN(struct stlink* sl, unsigned int can_num)
 	return;
 }
 
-
 struct stlink *stl_usb_scan(struct stlink *sl, const char *dev_name)
 {
 	libusb_device_handle *dev_handle;
@@ -1493,6 +1518,11 @@ struct stlink *stl_usb_scan(struct stlink *sl, const char *dev_name)
 	}
 
 	cnt = libusb_get_device_list(NULL, &devs);
+	if (cnt < 0) {
+		fprintf(stderr, "USB access failed, %s.\n", strerror(errno));
+		
+		return 0;
+	}
 
 	dev_handle = libusb_open_device_with_vid_pid(NULL, USB_ST_VID, 0x3748);
 
@@ -1530,7 +1560,7 @@ int main(int argc, char *argv[])
 {
     char *program;				/* Program name without path. */
     int c, errflag = 0;
-	char *dev_name;				/* Path of SCSI device e.g. "/dev/stlink" */
+	char *dev_name;				/* Path of STLink device e.g. "/dev/stlink" */
 	char *upload_path = 0, *download_path = 0, *verify_path = 0;
 	int do_blink = 0;
 	struct stlink *sl;
@@ -1566,7 +1596,7 @@ int main(int argc, char *argv[])
 	}
 
 	stl_get_version(sl);
-	sl->ver = *(struct STLinkVersion *)sl->q_buf;
+	sl->ver = *(struct STLinkVersion *)sl->data_buf;
 	if (sl->ver.ST_VendorID == 0 && sl->ver.ST_ProductID == 0) {
 		fprintf(stderr, "The device %s is reporting an ID of 0/0.\n"
 				"  Either the STLink is not plugged in or it is still "
@@ -1615,7 +1645,7 @@ int main(int argc, char *argv[])
 		if (strcmp("regs", cmd) == 0) {
 			/* We must be stopped for this to work! */
 			stl_get_allregs(sl);
-			sl->reg = *(struct ARMcoreRegs*)sl->q_buf;
+			sl->reg = *(struct ARMcoreRegs*)sl->data_buf;
 			stlink_print_arm_regs(&sl->reg);
 		} else if (strncmp("reg", cmd, 3) == 0) {
 			/* We must be stopped for this to work! */
@@ -1649,9 +1679,9 @@ int main(int argc, char *argv[])
 		} else if (strncmp("read", cmd, 4) == 0) {
 			/* Read memory location */
 			int memaddr = strtoul(cmd+4, 0, 0); /* Super sleazy */
-			uint32_t *result = (void*)sl->q_buf;
-			write_uint32(sl->scsi_cmd_blk + 2, memaddr);
-			write_uint16(sl->scsi_cmd_blk + 6, 17);
+			uint32_t *result = (void*)sl->data_buf;
+			write_uint32(sl->cmd_buf + 2, memaddr);
+			write_uint16(sl->cmd_buf + 6, 17);
 			stlink_cmd(sl, STLinkDebugReadMem32bit, memaddr, 16);
 			printf("Memory %8.8x is %8.8x %8.8x %8.8x %8.8x.\n",
 				   memaddr, result[0], result[1], result[2], result[3]);
@@ -1710,7 +1740,7 @@ int main(int argc, char *argv[])
 			stl_reset(sl);
 		} else if (strcmp("version", cmd) == 0) {
 			stl_get_version(sl);
-			sl->ver = *(struct STLinkVersion *)sl->q_buf;
+			sl->ver = *(struct STLinkVersion *)sl->data_buf;
 			stl_print_version(&sl->ver);
 		} else if (strcmp("debug", cmd) == 0) {
 			stl_enter_debug(sl);
@@ -1787,7 +1817,7 @@ int main(int argc, char *argv[])
 
 /*
  * Local variables:
- *  compile-command: "cc -O -Wall -Wstrict-prototypes -o stlinkv2-util stlinkv2-util.c -lusb"
+ *  compile-command: "cc -O -Wall -Wstrict-prototypes -o stlinkv2-util stlinkv2-util.c -lusb-1.0"
  *  c-indent-level: 4
  *  c-basic-offset: 4
  *  tab-width: 4
