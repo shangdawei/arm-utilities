@@ -24,11 +24,13 @@ SUBSYSTEMS=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="3744", \
    ENV{DM_UDEV_DISABLE_DISK_RULES_FLAG}:="1", \
    OPTIONS="last_rule"
 
-
 SUBSYSTEMS=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="3748", \
-   MODE="0664", GROUP="tape", NAME="stlinkV2-%n",  SYMLINK+="stlink", \
+   MODE="0664", GROUP="tape", SYMLINK+="stlink", \
    ENV{STLINK}="1", \
-   OPTIONS="last_rule"
+
+#SUBSYSTEMS=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="3748", \
+#   MODE="0664", GROUP="tape", NAME="stlinkV2-%n",  SYMLINK+="stlink", \
+#   OPTIONS="last_rule"
 
 # Other possible settings:
 # OPTIONS="last_rule", ATTRS{vendor}=="STM32"
