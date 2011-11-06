@@ -454,7 +454,10 @@ void stl_close(struct stlink *sl)
 #if defined(__ms_windows__)
 	CloseHandle(sl->fd);
 #else
-	close(sl->fd);
+	if (sl->usb_hand)
+		libusb_close(sl->usb_hand);
+	if (sl->fd >= 0)
+		close(sl->fd);
 #endif
 }
 
@@ -614,22 +617,35 @@ int stl_do_cmd(struct stlink *stl)
 	ret = libusb_bulk_transfer(stl->usb_hand, USB_PIPE_OUT,
 							   stl->cmd_buf, 16, &actual_xfer_len,
 							   USB_TIMEOUT_MSEC);
+	if (stl->verbose && actual_xfer_len != 16)
+		printf("Mismatched USB transfer length %d vs %d.\n",
+			   16, actual_xfer_len);
 	if (stl->verbose > 3)
 		printf("Sent command, status %d length %d.\n", ret, actual_xfer_len);
 
-	if (stl->xfer_dir == STLinkParamFromDev) {
-		ret = libusb_bulk_transfer(stl->usb_hand, USB_PIPE_IN,
-								   stl->data_buf, stl->data_len,
-								   &actual_xfer_len, USB_TIMEOUT_MSEC);
-		if (stl->verbose > 3)
-			printf("Transfer done, status %d read length %d of %d.\n",
-				   ret, actual_xfer_len, stl->data_len);
-	} else {
+	if (stl->xfer_dir == STLinkParamToDev) {
 		ret = libusb_bulk_transfer(stl->usb_hand, USB_PIPE_OUT,
 								   stl->data_buf, stl->data_len,
 								   &actual_xfer_len, USB_TIMEOUT_MSEC);
+		if (ret != 0 || actual_xfer_len != stl->data_len)
+			printf(" * Failed USB output, %d, Command %2.2x %2.2x transfer "
+				   "length %d vs %d.\n",
+				   ret, stl->cmd_buf[0], stl->cmd_buf[1],
+				   actual_xfer_len, stl->data_len);
 		if (stl->verbose > 3)
 			printf("Transfer done, status %d write length %d of %d.\n",
+				   ret, actual_xfer_len, stl->data_len);
+	} else if (stl->data_len != 0) {
+		ret = libusb_bulk_transfer(stl->usb_hand, USB_PIPE_IN,
+								   stl->data_buf, stl->data_len + 10,
+								   &actual_xfer_len, USB_TIMEOUT_MSEC);
+		if (ret != 0 || actual_xfer_len != stl->data_len)
+			printf(" * Failed USB input, %d, Command %2.2x %2.2x "
+				   "transfer length %d vs %d.\n",
+				   ret, stl->cmd_buf[0], stl->cmd_buf[1],
+				   actual_xfer_len, stl->data_len);
+		if (stl->verbose > 3)
+			printf("Transfer done, status %d read length %d of %d.\n",
 				   ret, actual_xfer_len, stl->data_len);
 	}
 
@@ -1426,7 +1442,7 @@ static void stm_show_timer(struct stlink* sl, unsigned int timer_num)
 		return;
 	}
 	write_uint32(sl->cmd_buf + 2, timer_addr);
-	write_uint16(sl->cmd_buf + 6, 81);
+	write_uint16(sl->cmd_buf + 6, 80);
 	stlink_cmd(sl, STLinkDebugReadMem32bit, timer_addr, 80);
 	printf("Timer %d at %8.8x: %8.8x %8.8x %8.8x %8.8x.\n"
 		   "%8.8x %8.8x %8.8x %8.8x.\n"
@@ -1540,14 +1556,10 @@ struct stlink *stl_usb_scan(struct stlink *sl, const char *dev_name)
 		printf("usb_set_altinterface failed.\n");
 	}
 #endif
-	printf("Set STLink v2 to configuration 1, status %d.\n", r);
-
-	printf("STLink v2 endpoint size %d.\n", 
-		   libusb_get_max_packet_size(libusb_get_device(dev_handle),
-									  USB_PIPE_IN));
 
 	memset(sl, 0, sizeof *sl);
 	sl->dev_path = "USB ST Link v2";
+	sl->fd = -1;
 	sl->verbose = verbose;
 	sl->usb_hand = dev_handle;
 	sl->core_state = STLINK_CORE_UNKNOWN_STATE;
@@ -1588,9 +1600,7 @@ int main(int argc, char *argv[])
     }
 
 	sl = stl_usb_scan(&global_stlink, "USB STLink");
-	if (sl != NULL) {
-		printf("Found a USB STLink v2.\n");
-	} else {
+	if (sl == NULL) {
 		fprintf(stderr, "Could not find the STLink.\n");
 		return EXIT_FAILURE;
 	}
@@ -1625,7 +1635,7 @@ int main(int argc, char *argv[])
 	stl_enter_SWD_mode(sl);
 	if (stl_mode(sl) == STLinkDevMode_Debug) {
 		uint32_t core_id = stl_get_core_id(sl);
-		if (core_id != 0x1BA01477)
+		if (core_id != 0x1BA01477 && core_id != 0x2BA01477)
 			fprintf(stderr, "Warning: SWD core ID %8.8x did not match the "
 					"expected value of %8.8x.\n", core_id, 0x1BA01477);
 	}
@@ -1638,6 +1648,7 @@ int main(int argc, char *argv[])
 		stl_fread(sl, upload_path, sl->sys_base, sl->sys_size);
 	}
 #endif
+
 	while (argv[optind]) {
 		char *cmd = argv[optind];
 		if (verbose) printf("Executing command %s.\n", argv[optind]);
@@ -1681,7 +1692,7 @@ int main(int argc, char *argv[])
 			int memaddr = strtoul(cmd+4, 0, 0); /* Super sleazy */
 			uint32_t *result = (void*)sl->data_buf;
 			write_uint32(sl->cmd_buf + 2, memaddr);
-			write_uint16(sl->cmd_buf + 6, 17);
+			write_uint16(sl->cmd_buf + 6, 16);
 			stlink_cmd(sl, STLinkDebugReadMem32bit, memaddr, 16);
 			printf("Memory %8.8x is %8.8x %8.8x %8.8x %8.8x.\n",
 				   memaddr, result[0], result[1], result[2], result[3]);
