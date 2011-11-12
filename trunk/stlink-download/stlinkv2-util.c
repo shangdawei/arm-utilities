@@ -144,35 +144,58 @@ int verbose = 0;
  * you have to update.  But this tool is for microcontroller developers so
  * I have no qualms about being far more flexible.
  */
-#define DBGMCU_IDCODE 0xE0042000.	/* The MCU device ID. */
+#define DBGMCU_IDCODE 0xE0042000	/* The MCU device ID. */
 struct stm_chip_params {			/* Unused/placeholder parameter table. */
+	const char *name;
+	int cap_flags;				/* Bitmapped capability indicators. */
 	uint32_t core_id, dbgmcu_idcode;
 	uint32_t flash_base, flash_size, flash_pgsize;
 	uint32_t sysflash_base, sysflash_size, sysflash_pgsize;
 	uint32_t sram_base, sram_size;
 } stm_devids[] = {
 	/* Devices have 4k or 8k SRAM and 16k-128k flash. */
-	{ 0x1ba01477, 0x10016420,	/* STM32F100 on Discovery. */
+	{ "STM32", 0,				/* Generic fall-back. */
+	  0x1ba01477, 0x10000400,
 	  0x08000000, 128*1024, 1024,
 	  0x1ffff000, 2*1024, 1024,
 	  0x20000000, 8*1024},
-	{ 0x1ba01477, 0x10016412,	/* Low-density devices. */
+	{ "STM32F100", 0,
+	  0x1ba01477, 0x10016420,	/* STM32F100 on Discovery. */
+	  0x08000000, 128*1024, 1024,
+	  0x1ffff000, 2*1024, 1024,
+	  0x20000000, 8*1024},
+	{ "STM32F10x", 0,
+	  0x1ba01477, 0x10016412,	/* Low-density devices. */
 	  0x08000000, 32*1024, 1024,
 	  0x1ffff000, 2*1024, 1024,
 	  0x20000000, 4*1024},
-	{ 0x1ba01477, 0x10016410,	/* Medium-density devices. */
+	{ "STM32F10x", 0,
+	  0x1ba01477, 0x10016410,	/* Medium-density devices. */
 	  0x08000000, 128*1024, 1024,
 	  0x1ffff000, 2*1024, 1024,
 	  0x20000000, 8*1024},
-	{ 0x1ba01477, 0x10016414,	/* High-density devices. */
+	{ "STM32F10x", 0,
+	  0x1ba01477, 0x10016414,	/* High-density devices. */
 	  0x08000000, 512*1024, 1024,
 	  0x1ffff000, 2*1024, 1024,
 	  0x20000000, 8*1024},
-	{ 0x1ba01477, 0x10016430,	/* XL-density devices. */
+	{ "STM32F10x", 0,
+	  0x1ba01477, 0x10016430,	/* XL-density devices. */
 	  0x08000000, 1024*1024, 2048,
 	  0x1fffe000, 6*1024, 1024,
 	  0x20000000, 8*1024},
-	{ 0x1ba01477, 0x10016418,	/* Connectivity devices. */
+	{ "STM32F107", 0,
+	  0x1ba01477, 0x10016418,	/* Connectivity devices. */
+	  0x08000000, 256*1024, 2048,
+	  0x1fffb000, 18*1024, 1024,
+	  0x20000000, 8*1024},
+	{ "STM32L152", 0,
+	  0x1ba01477, 0x10186416,	/* L152RBT6 as on 32L-Discovery. */
+	  0x08000000, 128*1024, 2048,
+	  0x1fffb000, 16*1024, 1024,
+	  0x20000000, 8*1024},
+	{ "STM32F4xx", 0,
+	  0x2ba01477, 0x10006420,	/* F4 (Cortex M4) devices. */
 	  0x08000000, 256*1024, 2048,
 	  0x1fffb000, 18*1024, 1024,
 	  0x20000000, 8*1024},
@@ -285,7 +308,7 @@ enum STLink_JTAG_Cmds {
 	STLinkDebugRunCore=0x09,
 	STLinkDebugStepCore=0x0A,
 	STLinkDebugSetFP=0x0B,		/* Flash Patch breakpoint */
-	/* What is the missing command? */
+	/* Command12 is unknown.  It returns no data, and seems to be a NoOp */
 	STLinkDebugWriteMem8bit=0x0D,
 	STLinkDebugClearFP=0x0E,
 	STLinkDebugWriteDebugReg=0x0F,
@@ -321,20 +344,17 @@ typedef uint32_t stm32_addr_t;
 
 struct stlink {
 	const char *dev_path;
-#if defined(__ms_windows__)
+#if defined(__linux__) || defined(__APPLE__)
+	int fd;
+	libusb_device_handle *usb_hand;
+#elif defined(__ms_windows__)
 	HANDLE fd;
-#elif defined(__linux__)
-	int fd;
-	libusb_device_handle *usb_hand;
-#elif defined(__APPLE__)
-	int fd;
-	libusb_device_handle *usb_hand;
 #else
 #warning "Undefined OS."
 #endif
 	int verbose;				/* A local copy of 'verbose'. */
 
-	int chip_index;				/* Index into chip table (below). */
+	int chip_index;				/* Index into stm_devids[], if known. */
 	int flash_mem_size;			/* Reported flash memory size in KB. */
 	stm32_addr_t flash_base;
 
@@ -458,6 +478,7 @@ void stl_close(struct stlink *sl)
 		libusb_close(sl->usb_hand);
 	if (sl->fd >= 0)
 		close(sl->fd);
+	libusb_exit(NULL);
 #endif
 }
 
@@ -487,9 +508,6 @@ void st_gcmd(struct stlink *sl, uint8_t st_cmd0, uint8_t st_cmd1, int resp_len)
 int stlink_cmd(struct stlink *sl, uint8_t st_cmd1, uint8_t st_cmd2,
 			   int resp_len)
 {
-#if 0
-	memset(sl->cmd_buf, 0x55, sizeof(sl->cmd_buf));
-#endif
 	sl->cmd_buf[0] = STLinkDebugCommand;
 	sl->cmd_buf[1] = st_cmd1;
 	sl->cmd_buf[2] = st_cmd2;
@@ -538,8 +556,8 @@ int stlink_cmd(struct stlink *sl, uint8_t st_cmd1, uint8_t st_cmd2,
 
 /* Basic target memory read and write functions.
  * Both bulk and single 32 bit word functions are here.
- * The bulk version has the caller uses the SCSI buffer.
- * The 32 bit versions use function parameter and return data.
+ * The 32 bit versions use function parameters and return value.
+ * The bulk version has the caller fill/empty sl->data_buf.
  */
 /* Write to the ARM memory starting at ADDR for LEN bytes.
  * The *_mem8 variant has a maximum LEN of 64 bytes.
@@ -610,16 +628,19 @@ int stl_do_cmd(struct stlink *stl)
 	int ret, actual_xfer_len;
 
 	if (stl->verbose > 3)
-		printf("Transfer starting, length %d %p.\n", stl->data_len,
-			   stl->usb_hand);
+		printf("Starting command %2.2x %2.2x ..., data length %d.\n",
+			   stl->cmd_buf[0], stl->cmd_buf[1],
+			   stl->data_len);
 
-	/* Should use stl->cmd_len, but we send a fixed 16 bytes. */
+	/* The stl->cmd_len value doesn't need to be precise.  Bytes after
+	 * the command are ignored. */
 	ret = libusb_bulk_transfer(stl->usb_hand, USB_PIPE_OUT,
-							   stl->cmd_buf, 16, &actual_xfer_len,
+							   stl->cmd_buf, stl->cmd_len, &actual_xfer_len,
 							   USB_TIMEOUT_MSEC);
-	if (stl->verbose && actual_xfer_len != 16)
-		printf("Mismatched USB transfer length %d vs %d.\n",
-			   16, actual_xfer_len);
+	if (stl->verbose && actual_xfer_len != stl->cmd_len)
+		fprintf(stderr, "Mismatched USB transfer for command, tried %d "
+				"vs %d sent.\n",
+				stl->cmd_len, actual_xfer_len);
 	if (stl->verbose > 3)
 		printf("Sent command, status %d length %d.\n", ret, actual_xfer_len);
 
@@ -629,7 +650,7 @@ int stl_do_cmd(struct stlink *stl)
 								   &actual_xfer_len, USB_TIMEOUT_MSEC);
 		if (ret != 0 || actual_xfer_len != stl->data_len)
 			printf(" * Failed USB output, %d, Command %2.2x %2.2x transfer "
-				   "length %d vs %d.\n",
+				   "length %d vs %d expected.\n",
 				   ret, stl->cmd_buf[0], stl->cmd_buf[1],
 				   actual_xfer_len, stl->data_len);
 		if (stl->verbose > 3)
@@ -637,11 +658,11 @@ int stl_do_cmd(struct stlink *stl)
 				   ret, actual_xfer_len, stl->data_len);
 	} else if (stl->data_len != 0) {
 		ret = libusb_bulk_transfer(stl->usb_hand, USB_PIPE_IN,
-								   stl->data_buf, stl->data_len + 10,
+								   stl->data_buf, stl->data_len,
 								   &actual_xfer_len, USB_TIMEOUT_MSEC);
 		if (ret != 0 || actual_xfer_len != stl->data_len)
 			printf(" * Failed USB input, %d, Command %2.2x %2.2x "
-				   "transfer length %d vs %d.\n",
+				   "transfer length %d vs expected %d.\n",
 				   ret, stl->cmd_buf[0], stl->cmd_buf[1],
 				   actual_xfer_len, stl->data_len);
 		if (stl->verbose > 3)
@@ -702,7 +723,9 @@ int stl_do_cmd(struct stlink *stl)
 
 static void stl_print_version(struct STLinkVersion *ver)
 {
-	if (ver->ST_VendorID == USB_ST_VID && ver->ST_ProductID == USB_STLINK_PID)
+	if (ver->ST_VendorID == USB_ST_VID &&
+		(ver->ST_ProductID == USB_STLINK_PID ||
+		 ver->ST_ProductID == USB_STLINKv2_PID))
 		fprintf(stderr, "Standard Vendor/Product ID 0x%04x 0x%04x\n",
 				ver->ST_VendorID, ver->ST_ProductID);
 	else
@@ -1342,18 +1365,26 @@ int stl_kick_mode(struct stlink *sl)
 
 static void stm_info(struct stlink* sl)
 {
-	uint32_t devparam;
+	uint32_t idcode, devparam;
+	int i;
+
+	idcode = sl_rd32(sl, DBGMCU_IDCODE); 			/* At 0xE0042000 */
+	for (i = 0; stm_devids[i].name; i++)
+		if (idcode == stm_devids[i].dbgmcu_idcode) {
+			sl->chip_index = i;
+			break;
+		}
+
+	printf(" Target DBGMC_IDCODE %3.3x (Rev ID %4.4x) %s.\n",
+		   idcode & 0x0FFF, idcode, stm_devids[sl->chip_index].name);
 
 	/* Read the device parameters: flash size and serial number. */
 	devparam = sl_rd32(sl, 0x1FFFf7e0);
 	printf("Flash size %dK (register %4.4x).\n",
 		   devparam & 0xff, devparam);
-	printf("Information block %8.8x %8.8x %8.8x %8.8x.\n",
+	printf("  Information block %8.8x %8.8x %8.8x %8.8x.\n",
 		   sl_rd32(sl, 0x1FFFf800), sl_rd32(sl, 0x1FFFf804),
 		   sl_rd32(sl, 0x1FFFf808), sl_rd32(sl, 0x1FFFf80c));
-	devparam = sl_rd32(sl, 0xE0042000);
-	printf("DBGMC_IDCODE %3.3x (Rev ID %4.4x).\n",
-		   devparam & 0x0FFF, devparam);
 	return;
 }
 
@@ -1540,10 +1571,14 @@ struct stlink *stl_usb_scan(struct stlink *sl, const char *dev_name)
 		return 0;
 	}
 
-	dev_handle = libusb_open_device_with_vid_pid(NULL, USB_ST_VID, 0x3748);
+	dev_handle = libusb_open_device_with_vid_pid(NULL,
+												 USB_ST_VID, USB_STLINKv2_PID);
 
-	if (dev_handle == NULL)
+	if (dev_handle == NULL) {
+		if (verbose)
+			printf("No USB STLink found.\n");
 		return NULL;
+	}
 
 	printf("Found a STLink v2 on the USB bus, %p.\n", dev_handle);
 
@@ -1601,7 +1636,7 @@ int main(int argc, char *argv[])
 
 	sl = stl_usb_scan(&global_stlink, "USB STLink");
 	if (sl == NULL) {
-		fprintf(stderr, "Could not find the STLink.\n");
+		fprintf(stderr, "Could not find a STLink.\n");
 		return EXIT_FAILURE;
 	}
 
@@ -1611,9 +1646,13 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "The device %s is reporting an ID of 0/0.\n"
 				"  Either the STLink is not plugged in or it is still "
 				"being initialized.\n",
-				dev_name);
+				sl->dev_path);
 		return EXIT_FAILURE;
 	}
+#if 0
+	if (sl->verbose)
+		stl_print_version(&sl->ver);
+#endif
 	if (sl->ver.ST_VendorID != USB_ST_VID  ||
 		(sl->ver.ST_ProductID != USB_STLINK_PID &&
 		 sl->ver.ST_ProductID != USB_STLINKv2_PID)) {
@@ -1624,13 +1663,19 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
-	if (sl->verbose)
-		stl_print_version(&sl->ver);
-
-	/* When we open the device it is likely in mass storage mode.
+	/* When we open the device it is in an unknown mode.
+	 * The v1 is likely in mass storage mode.
 	 * Switch to Single Wire Debug (SWD) mode and issue the required
 	 * first command, reading the core ID.
 	 */
+#if 0
+	fprintf(stderr, "STLink status is %8.8x\n", stl_mode(sl));
+	stl_enter_SWD_mode(sl);
+	sleep(1);
+	fprintf(stderr, "STLink status is %8.8x\n", stl_mode(sl));
+
+	fprintf(stderr, "Target core ID is %8.8x\n", stl_get_core_id(sl));
+#endif
 	stl_kick_mode(sl);
 	stl_enter_SWD_mode(sl);
 	if (stl_mode(sl) == STLinkDevMode_Debug) {
@@ -1778,8 +1823,8 @@ int main(int argc, char *argv[])
 			int memaddr = strtoul(cmd+7, 0, 0); /* Super sleazy */
 			uint32_t buf = 0x6524dbec;
 			stl_flash_write(sl, memaddr, &buf, sizeof buf);
-		} else if (strcmp("cmd13", cmd) == 0) {
-			printf("Result of Commmand13 is %2.2x.\n",
+		} else if (strcmp("cmd12", cmd) == 0) {
+			printf("Result of Commmand12 is %2.2x.\n",
 				   stlink_cmd(sl, 0x0c, 0, 0));
 		}
 		/* Next, some ad hoc debugging commands. */
