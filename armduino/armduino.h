@@ -86,11 +86,13 @@ typedef int32_t prog_int32_t;
 #define SPI1		0x40013000 	/* SPI 1 out of order. */
 #define SPI2		0x40003800
 #define SPI3		0x40003C00 	/* Hi-dens only */
-#define USART1		0x40013800 	/* Address out of order */
-#define USART2		0x40004400
-#define USART3		0x40004800
-#define UART4		0x40004C00 	/* UART4-5 Hi-dens only */
-#define UART5		0x40005000
+#if 0
+#endif
+#define USART1_BASE		0x40013800 	/* Address out of order */
+#define USART2_BASE		0x40004400
+#define USART3_BASE		0x40004800
+#define UART4_BASE		0x40004C00 	/* UART4-5 Hi-dens only */
+#define UART5_BASE		0x40005000
 #define I2C1		0x40005400
 #define I2C2		0x40005800
 
@@ -631,6 +633,7 @@ typedef int32_t prog_int32_t;
 
 #define __INTR_ATTRS used,interrupt
 #define __ISR_ATTRS __attribute__((__INTR_ATTRS)) 
+#define IRQHandler(vector, ...) ISR(vector, __VA_ARGS__)
 #define ISR(vector, ...)            \
     void vector##_IRQHandler(void) __attribute__ ((__INTR_ATTRS)) __VA_ARGS__; \
     void vector##_IRQHandler(void)
