@@ -81,6 +81,7 @@ Usage notes:
 #include <sys/stat.h>
 
 #if defined(__linux__)
+/* We use the libusb API for the STLink v2. */
 #include <libusb-1.0/libusb.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -97,7 +98,10 @@ Usage notes:
 
 /* $Vbase: 1.54 14 January 2011 00:25:11 becker$ */
 static const char version_msg[] =
-"STLink programmer/debugging utility $Id: stlink-download.c 22 2011-08-06 19:17:56Z donald.becker@gmail.com $  Copyright Donald Becker";
+	"STLink programmer/debugging utility.  Written by Donald Becker and "
+	"Hugo Becker\n"
+	" $Id: stlinkv2-util.c 22 2011-12-06 01:18:46Z donald.becker@gmail.com $\n"
+	" Built "__DATE__" from "__FILE__;
 
 static const char usage_msg[] =
 #if defined(__ms_windows__)
@@ -106,6 +110,7 @@ static const char usage_msg[] =
 	"\nUsage: %s [/dev/stlink] <command> ...\n\n"
 #endif
 	"Commands are:\n"
+	"  program=<file>           Erase whole flash and write firmware file\n"
 	"  info version blink\n"
 	"  debug reg<regnum> wreg<regnum>=<value> regs reset run step status\n"
 	"  erase=<addr> erase=all<addr>\n"
@@ -164,6 +169,11 @@ struct stm_chip_params {			/* Unused/placeholder parameter table. */
 	  0x08000000, 128*1024, 1024,
 	  0x1ffff000, 2*1024, 1024,
 	  0x20000000, 8*1024},
+	{ "STM32F103R4T6", 0,
+	  0x1ba01477, 0x00005e7d,	/* Low-density devices. */
+	  0x08000000, 32*1024, 1024,
+	  0x1ffff000, 2*1024, 1024,
+	  0x20000000, 4*1024},
 	{ "STM32F10x", 0,
 	  0x1ba01477, 0x10016412,	/* Low-density devices. */
 	  0x08000000, 32*1024, 1024,
@@ -351,6 +361,7 @@ struct stlink {
 	HANDLE fd;
 #else
 #warning "Undefined OS."
+	int fd;
 #endif
 	int verbose;				/* A local copy of 'verbose'. */
 
@@ -483,7 +494,8 @@ void stl_close(struct stlink *sl)
 }
 
 /* Execute a general command, with arbitrary parameters.
- * This is only used for STLink device commands, not for target commands.
+ * This is only used for commands to the STLink device itself, not for
+ * commands to the target processor.
  */
 void st_gcmd(struct stlink *sl, uint8_t st_cmd0, uint8_t st_cmd1, int resp_len)
 {
@@ -786,6 +798,19 @@ int stl_set_breakpoint(struct stlink *sl, int fp_nr, uint32_t addr, int fp)
 #define FLASH_RDPTR_KEY 0x00a5
 #define FLASH_KEY1 0x45670123
 #define FLASH_KEY2 0xcdef89ab
+
+/* 32L15x flash controller. */
+#define L15_FLASH_REGS 0x40023C00
+#define L15_FLASH_ACR		(FLASH_REGS_ADDR + 0x00)
+#define L15_FLASH_PECR		(FLASH_REGS_ADDR + 0x04)
+#define L15_FLASH_PDKEYR	(FLASH_REGS_ADDR + 0x08)
+#define L15_FLASH_PEKEYR	(FLASH_REGS_ADDR + 0x0C)
+
+#define L15_FLASH_WRPR	(FLASH_REGS_ADDR + 0x20)
+
+#define FLASH_PEKEY1 0x89abcdef
+#define FLASH_PEKEY2 0x02030405
+
 
 #define FLASH_SR_BSY 0x0001
 #define FLASH_SR_PGERR 0x0004
@@ -1319,9 +1344,11 @@ int stl_kick_mode(struct stlink *sl)
 
 	if (sl->verbose) {
 		sl->core_state = stl_get_status(sl);
-		printf("ARM status is 0x%4.4x: %s.\n", sl->core_state,
-			   sl->core_state==STLINK_CORE_RUNNING ? "running" :
-			   (sl->core_state==STLINK_CORE_HALTED ? "halted" : "unknown"));
+		fprintf(stderr, " STLink mode is %4.4x.\n"
+				" ARM status is 0x%4.4x: %s.\n",
+				stlink_mode, sl->core_state,
+				sl->core_state==STLINK_CORE_RUNNING ? "running" :
+				(sl->core_state==STLINK_CORE_HALTED ? "halted" : "unknown"));
 	}
 
 
@@ -1338,7 +1365,8 @@ int stl_kick_mode(struct stlink *sl)
 	 * A disconnect lasts for several seconds.
 	 * Give the kernel time to handle the fresh plug event.
 	 */
-	fprintf(stderr, "Waiting to reopen the STLink device...\n");
+	fprintf(stderr, "Waiting to reopen the STLink device at '%s' ...\n",
+			sl->dev_path);
 	for (i = 0; i < 10; i++) {
 		sl->fd = open(sl->dev_path, O_RDWR);
 		if (sl->fd >= 0) {
@@ -1393,6 +1421,7 @@ static void stm_info(struct stlink* sl)
  * The LEDs are on PortC pins PC8 and PC9
  * RM0041 Reference manual - STM32F100xx advanced ARM-based 32-bit MCUs
  */
+#define GPIOB		0x40010C08		/* PortB register base */
 #define GPIOC		0x40011000		/* PortC register base */
 #define GPIOC_CRH	(GPIOC + 0x04)	/* Port configuration register high */
 #define GPIOC_ODR	(GPIOC + 0x0c)	/* Port output data register */
@@ -1580,7 +1609,8 @@ struct stlink *stl_usb_scan(struct stlink *sl, const char *dev_name)
 		return NULL;
 	}
 
-	printf("Found a STLink v2 on the USB bus, %p.\n", dev_handle);
+	if (verbose)
+		printf("Found a STLink v2 on the USB bus, %p.\n", dev_handle);
 
 	/* We know that configuration 1 is the only one. */
 	r = libusb_reset_device(dev_handle);
@@ -1593,7 +1623,7 @@ struct stlink *stl_usb_scan(struct stlink *sl, const char *dev_name)
 #endif
 
 	memset(sl, 0, sizeof *sl);
-	sl->dev_path = "USB ST Link v2";
+	sl->dev_path = "/dev/stlink";
 	sl->fd = -1;
 	sl->verbose = verbose;
 	sl->usb_hand = dev_handle;
@@ -1649,7 +1679,7 @@ int main(int argc, char *argv[])
 				sl->dev_path);
 		return EXIT_FAILURE;
 	}
-#if 0
+#if 1
 	if (sl->verbose)
 		stl_print_version(&sl->ver);
 #endif
@@ -1678,8 +1708,18 @@ int main(int argc, char *argv[])
 #endif
 	stl_kick_mode(sl);
 	stl_enter_SWD_mode(sl);
-	if (stl_mode(sl) == STLinkDevMode_Debug) {
+	if (stl_mode(sl) != STLinkDevMode_Debug) {
+		fprintf(stderr, "Warning: Failed to switch the STLink into debug mode.\n");
+	}
+
+	/* At this point we have identified a working STLink programmer.
+	 * We now check on the target chip ID and state.
+	 */
+	{
 		uint32_t core_id = stl_get_core_id(sl);
+		if (verbose)
+			printf("SWD core ID %8.8x, MCU ID is %8.8x.\n",
+				   core_id, sl_rd32(sl, DBGMCU_IDCODE));
 		if (core_id != 0x1BA01477 && core_id != 0x2BA01477)
 			fprintf(stderr, "Warning: SWD core ID %8.8x did not match the "
 					"expected value of %8.8x.\n", core_id, 0x1BA01477);
