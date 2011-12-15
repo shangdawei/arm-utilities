@@ -46,15 +46,18 @@ typedef signed char int8_t;
 #define SysTick_Count		 _MMIO_DWORD(0xE000E018)
 #define SysTick_Calibration	 _MMIO_DWORD(0xE000E01C)
 
-
 /* Interrupts are enabled with a pair of 256 bit fields.  One sets the
  * enable, the other clears the enable.
+ * Software may set and clear pending interrupts with SET/CLRPEND bit fields.
  */
-#define INTR_SETENA_BASE ((volatile uint32_t *)0xE000E100)
-#define INTR_CLRENA_BASE ((volatile uint32_t *)0xE000E180)
+#define ICTR _MMIO_DWORD(0xE000E004) /* Count of 32 bit words in fields */
+#define INTR_SETENA_BASE  ((volatile uint32_t *)0xE000E100)
+#define INTR_CLRENA_BASE  ((volatile uint32_t *)0xE000E180)
 #define INTR_SETPEND_BASE ((volatile uint32_t *)0xE000E200)
 #define INTR_CLRPEND_BASE ((volatile uint32_t *)0xE000E280)
-#define INTR_ACTIVE_BASE ((volatile uint32_t *)0xE000E300)
+#define INTR_ACTIVE_BASE  ((volatile uint32_t *)0xE000E300) /* Read only */
+#define NVIC_IPR_BASE	  ((volatile uint8_t  *)0xE000E400)
+#define NVIC_PRIORITY NVIC_IPR_BASE
 
 #define INTR_SETENA(intr_num) \
   INTR_SETENA_BASE[(intr_num)>>5] = 1 << ((intr_num) & 0x1F)
@@ -64,6 +67,8 @@ typedef signed char int8_t;
   INTR_SETPEND_BASE[(intr_num)>>5] = 1 << ((intr_num) & 0x1F)
 #define INTR_CLRPEND(intr_num) \
   INTR_CLRPEND_BASE[(intr_num)>>5] = 1 << ((intr_num) & 0x1F)
+#define INTR_ACTIVE(intr_num) \
+	(INTR_ACTIVE_BASE[(intr_num)>>5] & (1 << ((intr_num) & 0x1F)))
 
 /* The list of ARM core interrupts. */
 enum ARMCore_Interrupts	{
@@ -78,6 +83,13 @@ void _ARM_HANDLER_ATTRS SVC_Handler(void);
 void _ARM_HANDLER_ATTRS DebugMon_Handler(void);
 void _ARM_HANDLER_ATTRS PendSV_Handler(void);
 void _ARM_HANDLER_ATTRS SysTick_Handler(void);
+
+/* Debug module, Cortex-M3 TRM 7.1.3 */
+#define DFSR _MMIO_DWORD(0xE000ED30)
+#define DHCSR _MMIO_DWORD(0xE000EDF0)
+#define DCRSR _MMIO_DWORD(0xE000EDF4)
+#define DCRDR _MMIO_DWORD(0xE000EDF8)
+#define DEMCR _MMIO_DWORD(0xE000EDFC)
 
 #endif
 /*
