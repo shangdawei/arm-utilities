@@ -232,6 +232,11 @@ enum STLinkParamDirection {
  * milliseconds, with a more complex ones taking about 250 ms.
  */
 #define TIMEOUT_MSEC	800
+/* The maximum number of times to loop waiting for the flash page write
+ * program to finish.  This is under 50 cycles for a 1 millisecond USB 1.0
+ * poll, but takes 120-140 cycles for a 250 microsecond poll 
+ */
+#define FLASH_POLL_LIMIT 200
 
 /* The v1 device presents itself as a USB mass storage device.  Debug access
  * is through additional SCSI Command Descriptor Blocks (CDB) commands.
@@ -1033,7 +1038,7 @@ static int stl_flash_write(struct stlink *sl, stm32_addr_t flash_addr,
 			this_size = size;
 		stl_loader(sl, flash_addr + offset, buf + offset, this_size);
 		while (stl_get_status(sl) != STLINK_CORE_HALTED)
-			if (++failcount > 50) {
+			if (++failcount > FLASH_POLL_LIMIT) {
 				if (sl->verbose)
 					printf("Flash status %2.2x, control %4.4x status %x.\n",
 						   sl_rd32(sl, FLASH_SR), sl_rd32(sl, FLASH_CR),
@@ -1577,6 +1582,27 @@ static void stm_show_CAN(struct stlink* sl, unsigned int can_num)
 
 	return;
 }
+uint32_t DMA_addr_map[] = {0, 0x40020000, 0x40020400};
+
+static void stm_show_DMA(struct stlink* sl, unsigned int dma_num)
+{
+	uint32_t *result = (void*)sl->data_buf;
+	int i;
+
+	if (dma_num >= (sizeof DMA_addr_map / sizeof DMA_addr_map[0])) {
+		printf("Invalid DMA controller number.\n");
+		return;
+	}
+	stl_rd32_cmd(sl, DMA_addr_map[dma_num], 8 + 20*7);
+	printf("DMA %d at %8.8x: interrupts %8.8x %8.8x\n",
+		   dma_num, DMA_addr_map[dma_num], result[0], result[1]);
+	for (i = 1; i < 7; i++) {
+		int cb = i*5-3;
+		printf(" Channel %d: %8.8x %8.8x %8.8x->%8.8x\n",
+			   i, result[cb], result[cb+1], result[cb+2], result[cb+3]);
+	}
+	return;
+}
 
 struct stlink *stl_usb_scan(struct stlink *sl, const char *dev_name)
 {
@@ -1725,15 +1751,6 @@ int main(int argc, char *argv[])
 					"expected value of %8.8x.\n", core_id, 0x1BA01477);
 	}
 
-#if 0
-	/* read the system bootloader */
-	if (upload_path) {
-		fprintf(stderr, " Reading ARM memory 0x%8.8x..0x%8.8x bytes into %s.\n",
-				sl->sys_base, sl->sys_base+sl->sys_size, upload_path);
-		stl_fread(sl, upload_path, sl->sys_base, sl->sys_size);
-	}
-#endif
-
 	while (argv[optind]) {
 		char *cmd = argv[optind];
 		if (verbose) printf("Executing command %s.\n", argv[optind]);
@@ -1877,6 +1894,10 @@ int main(int argc, char *argv[])
 			/* Show the CAN controller state. */
 			int can_num = cmd[3] - '0';
 			stm_show_CAN(sl, can_num);
+		}
+		else if (strcmp("DMA1", cmd) == 0 || strcmp("DMA2", cmd) == 0) {
+			/* Show the DMA controller state. */
+			stm_show_DMA(sl, cmd[3] - '0');
 		}
 		else {
 			fprintf(stderr, "Unrecognized command '%s'.\n", cmd);
