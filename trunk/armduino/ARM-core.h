@@ -51,12 +51,13 @@ typedef signed char int8_t;
  * Software may set and clear pending interrupts with SET/CLRPEND bit fields.
  */
 #define ICTR _MMIO_DWORD(0xE000E004) /* Count of 32 bit words in fields */
-#define INTR_SETENA_BASE  ((volatile uint32_t *)0xE000E100)
-#define INTR_CLRENA_BASE  ((volatile uint32_t *)0xE000E180)
-#define INTR_SETPEND_BASE ((volatile uint32_t *)0xE000E200)
-#define INTR_CLRPEND_BASE ((volatile uint32_t *)0xE000E280)
-#define INTR_ACTIVE_BASE  ((volatile uint32_t *)0xE000E300) /* Read only */
-#define NVIC_IPR_BASE	  ((volatile uint8_t  *)0xE000E400)
+#define INTR_SETENA_BASE	((volatile uint32_t *)0xE000E100)
+#define INTR_CLRENA_BASE	((volatile uint32_t *)0xE000E180)
+#define INTR_SETPEND_BASE	((volatile uint32_t *)0xE000E200)
+#define INTR_CLRPEND_BASE	((volatile uint32_t *)0xE000E280)
+#define INTR_ACTIVE_BASE	((volatile uint32_t *)0xE000E300) /* Read only */
+#define NVIC_IPR_BASE		((volatile uint8_t  *)0xE000E400)
+#define NVIC_STIR			_MMIO_DWORD(0xE000EF00)
 #define NVIC_PRIORITY NVIC_IPR_BASE
 
 #define INTR_SETENA(intr_num) \
@@ -69,6 +70,20 @@ typedef signed char int8_t;
   INTR_CLRPEND_BASE[(intr_num)>>5] = 1 << ((intr_num) & 0x1F)
 #define INTR_ACTIVE(intr_num) \
 	(INTR_ACTIVE_BASE[(intr_num)>>5] & (1 << ((intr_num) & 0x1F)))
+
+/* The function names suggested by ARM. */
+#define __disable_irq()  __asm__("cpsie i	@ __sti" : : : "memory", "cc")
+#define __enable_irq() __asm__("cpsid i	@ __cli" : : : "memory", "cc")
+#define NVIC_SetPendingIRQ(intr_num) NVIC_STIR = (intr_num)
+#define NVIC_EnableIRQ(intr_num) INTR_SETENA(intr_num)
+#define NVIC_DisableIRQ(intr_num) INTR_CLRENA(intr_num)
+#define NVIC_SetPriority(IRQn, priority) \
+	NVIC_IPR_BASE[(IRQn)>>2] = \
+		(NVIC_IPR_BASE[(IRQn)>>2] | (0xFF << (((IRQn)&3)*8))) & \
+		(priority) << (((IRQn)&3)*8)
+#define NVIC_GetPriority(IRQn) \
+	(((((volatile uint32_t *)0xE000E400)[(IRQn)>>2]) >> (((IRQn)&3)*8)) & 0xFF
+
 
 /* The list of ARM core interrupts. */
 enum ARMCore_Interrupts	{
@@ -90,6 +105,10 @@ void _ARM_HANDLER_ATTRS SysTick_Handler(void);
 #define DCRSR _MMIO_DWORD(0xE000EDF4)
 #define DCRDR _MMIO_DWORD(0xE000EDF8)
 #define DEMCR _MMIO_DWORD(0xE000EDFC)
+
+/* Debug support. */
+#define DBGMCU_IDCODE 	_MMIO_DWORD(0xE0042000)
+#define DBGMCU_CR 		_MMIO_DWORD(0xE0042004)
 
 #endif
 /*
