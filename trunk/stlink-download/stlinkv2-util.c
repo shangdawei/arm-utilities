@@ -195,7 +195,7 @@ struct stm_chip_params {			/* Unused/placeholder parameter table. */
 	  0x1fffe000, 6*1024, 1024,
 	  0x20000000, 8*1024},
 	{ "STM32F107", 0,
-	  0x1ba01477, 0x10016418,	/* Connectivity devices. */
+	  0x1ba01477, 0x10016418,	/* Connectivity devices, 107RBT6. */
 	  0x08000000, 256*1024, 2048,
 	  0x1fffb000, 18*1024, 1024,
 	  0x20000000, 8*1024},
@@ -299,6 +299,8 @@ enum STLink_Device_Modes {		/* Response to STLinkGetCurrentMode */
 	STLinkDevMode_DFU=0,
 	STLinkDevMode_Mass=1,
 	STLinkDevMode_Debug=2,
+	STLinkDevMode_SWIM=3,
+	STLinkDevMode_Bootloader=4,
 	STLinkDFUModeExit=7,		/* Errrm, not really part of this set. */
 	STLinkDebugEnterSWD=0xA3,	/* Subcommand to STLinkDebugEnterMode */
 	STLinkDebugEnterJTAG=0x00,	/* Subcommand to STLinkDebugEnterMode */
@@ -310,6 +312,13 @@ enum STLink_JTAG_Cmds {
 	STLinkDebugEnterMode=0x20,	/* One of JTAG or SWD mode. */
 	STLinkDebugExit=0x21,
 	STLinkDebugReadCoreID=0x22,	/* Must be the first command. */
+	/* New interface commands? */ 
+	STLinkDebugUseAltAPI=0x30,
+	STLinkDebugAltAPIReadID=0x31,
+	STLinkDebugAltAPIResetTarget=0x32,
+	STLinkDebugAltAPIReadReg=0x33,
+	STLinkDebugAltAPIWriteReg=0x34,
+	STLinkDebugAltAPIReadAllRegs=0x3A,
 	/* The regular commands. */
 	STLinkDebugGetStatus=0x01,
 	STLinkDebugForceDebug=0x02,
@@ -1402,6 +1411,9 @@ static void stm_info(struct stlink* sl)
 	int i;
 
 	idcode = sl_rd32(sl, DBGMCU_IDCODE); 			/* At 0xE0042000 */
+	if (idcode == 0)								/* Cortex-M0 */
+		idcode = sl_rd32(sl, 0x40015800);
+		
 	for (i = 0; stm_devids[i].name; i++)
 		if (idcode == stm_devids[i].dbgmcu_idcode) {
 			sl->chip_index = i;
@@ -1412,12 +1424,18 @@ static void stm_info(struct stlink* sl)
 		   idcode & 0x0FFF, idcode, stm_devids[sl->chip_index].name);
 
 	/* Read the device parameters: flash size and serial number. */
+	/* The STM32F1 has the flash size at 0x1FFFf7e0. */
 	devparam = sl_rd32(sl, 0x1FFFf7e0);
+	sl->flash_mem_size = devparam & 0xff;
+	/* The STM32F2 and STM32F4 have the flash size at 0x1FFF7A22. */
+	sl->flash_mem_size = sl_rd32(sl, 0x1FFF7A22);
+
 	printf("Flash size %dK (register %4.4x).\n",
 		   devparam & 0xff, devparam);
 	printf("  Information block %8.8x %8.8x %8.8x %8.8x.\n",
 		   sl_rd32(sl, 0x1FFFf800), sl_rd32(sl, 0x1FFFf804),
 		   sl_rd32(sl, 0x1FFFf808), sl_rd32(sl, 0x1FFFf80c));
+
 	return;
 }
 
@@ -1485,123 +1503,209 @@ static void stm_raise_irq(struct stlink* sl, int irq_num)
 }
 #endif
 
-uint32_t timer_addr_map[] = {
-	0, 0x40012C00, 0x40000000, 0x40000400, 0x40000800, 0x40000C00, /* 0-5 */
-	0x40001000,	0x40001400, 0, 0, 0, 0, 0x40001800, 0x40001C00, /* 6-13 */
-	0x40002000, 0x40014000,	0x40014400, 0x40014800,				/* 14-17 */
+struct dev_peripheral {			/* Peripheral device table */
+	const char *name;			/* TIM1, CAN1 etc */
+	uint32_t addr;				/* Address in STM32 space */
+	int unit_num;				/* Unit number, 0 if sole unit */
+	void (*show_func1)(struct stlink* sl, struct dev_peripheral *dev_per,
+					   uint32_t data_blk[]);
+	int extent;					/* Size of peripheral region */
+	uint32_t avail;				/* Chip feature bitmap */
+	int feature;				/* Dev feature bitmap e.g. ADC2 misisng regs  */
 };
-	
-static void stm_show_timer(struct stlink* sl, unsigned int timer_num)
+
+static void stm_show_timer(struct stlink* sl, struct dev_peripheral *dp,
+							 uint32_t data[])
 {
-	uint32_t *result = (void*)sl->data_buf;
-	uint32_t timer_addr;
 	char active_map[4] = " H L";
 
-	if (timer_num > (sizeof timer_addr_map / sizeof timer_addr_map[0])) {
-		printf("Invalid timer number.\n");
-		return;
-	}
-	timer_addr = timer_addr_map[timer_num];
-	if (timer_addr == 0) {
-		printf("Invalid timer number.\n");
-		return;
-	}
-	write_uint32(sl->cmd_buf + 2, timer_addr);
-	write_uint16(sl->cmd_buf + 6, 80);
-	stlink_cmd(sl, STLinkDebugReadMem32bit, timer_addr, 80);
-	printf("Timer %d at %8.8x: %8.8x %8.8x %8.8x %8.8x.\n"
-		   "%8.8x %8.8x %8.8x %8.8x.\n"
-		   "%8.8x Count: %d Prescale: x%d Top: %d.\n"
-		   "CH1: %d %c Ch2: %d %c CH3: %d %c CH4: %d %c.\n",
-		   timer_num, timer_addr, result[0], result[1], result[2], result[3],
-		   result[4], result[5], result[6], result[7],
-		   result[8], result[9], result[10]+1, result[11],
-		   result[13], active_map[(result[8] >> 0) & 3],
-		   result[14], active_map[(result[8] >> 4) & 3],
-		   result[15], active_map[(result[8] >> 8) & 3],
-		   result[16], active_map[(result[8] >> 12) & 3]);
+	printf("%s Timer %d at %8.8x:  %4.4x %4.4x %4.4x %4.4x"
+		   "  %4.4x %4.4x %4.4x %4.4x  %4.4x\n"
+		   " IntrEnb:%4.4x Status:%4.4x\n"
+		   " Count: %d Prescale: x%d Top: %d.\n"
+		   " Ch1: %d %c Ch2: %d %c Ch3: %d %c Ch4: %d %c.\n",
+		   dp->name, dp->unit_num, dp->addr,
+		   data[0], data[1], data[2], data[3],
+		   data[4], data[5], data[6], data[7], data[8],
+		   data[3], data[4],
+		   data[9], data[10]+1, data[11],
+		   data[13], active_map[(data[8] >> 0) & 3],
+		   data[14], active_map[(data[8] >> 4) & 3],
+		   data[15], active_map[(data[8] >> 8) & 3],
+		   data[16], active_map[(data[8] >> 12) & 3]);
 }		
 
-uint32_t CAN_addr_map[] = {0, 0x40006400, 0x40006800};
-
-static void stm_show_CAN(struct stlink* sl, unsigned int can_num)
+static void stm_show_CAN(struct stlink *sl, struct dev_peripheral *dp,
+						 uint32_t data[])
 {
-	uint32_t *result = (void*)sl->data_buf;
 	uint32_t mode_map, scale_map, fifo_map, active_map;
 	int i;
 
-	/* This should never happen, but... */
-	if (can_num > (sizeof CAN_addr_map / sizeof CAN_addr_map[0])) {
-		printf("Invalid CAN controller number.\n");
-		return;
-	}
-	stl_rd32_cmd(sl, CAN_addr_map[can_num], 32);
-	printf("CAN %d at %8.8x: MCR %8.8x MSR %8.8x\n"
+	printf("%s at %8.8x: MCR %8.8x MSR %8.8x\n"
 		   " Tx/Rx0/Rx1 %8.8x %8.8x %8.8x\n"
 		   " IntrEnb %8.8x Errors %8.8x BitTiming %8.8x\n",
-		   can_num, CAN_addr_map[can_num],
-		   result[0], result[1], result[2], result[3],
-		   result[4], result[5], result[6], result[7]);
+		   dp->name, dp->addr,
+		   data[0], data[1], data[2], data[3],
+		   data[4], data[5], data[6], data[7]);
 	/* Show FIFO contents. */
-	stl_rd32_cmd(sl, CAN_addr_map[can_num] + 0x180, 80);
+	stl_rd32_cmd(sl, dp->addr + 0x180, 80);
 	printf(" CAN FIFOs\n"
 		   "  Tx0: %8.8x %8.8x %8.8x %8.8x\n"
 		   "  Tx1: %8.8x %8.8x %8.8x %8.8x\n"
 		   "  Tx2: %8.8x %8.8x %8.8x %8.8x\n"
 		   "  Rx0: %8.8x %8.8x %8.8x %8.8x\n"
 		   "  Rx1: %8.8x %8.8x %8.8x %8.8x\n",
-		   result[0], result[1], result[2], result[3],
-		   result[4], result[5], result[6], result[7],
-		   result[8], result[9], result[10], result[11],
-		   result[12], result[13], result[14], result[15],
-		   result[16], result[17], result[18], result[19]);
+		   data[0], data[1], data[2], data[3],
+		   data[4], data[5], data[6], data[7],
+		   data[8], data[9], data[10], data[11],
+		   data[12], data[13], data[14], data[15],
+		   data[16], data[17], data[18], data[19]);
 
 	/* Show filter, Mode/scale/dest/on %8.8x %8.8x %8.8x.\n */
 	stl_rd32_cmd(sl, 0x40006600, 32);
 	printf(" Rx filter   FMR %8.8x\n"
 		   "  Mode/scale/dest/on %8.8x %8.8x %8.8x %8.8x.\n",
-		   result[0], result[1], result[3], result[5], result[7]);
-	mode_map = result[1];
-	scale_map = result[3];
-	fifo_map = result[5];
-	active_map = result[7];
+		   data[0], data[1], data[3], data[5], data[7]);
+	mode_map = data[1];
+	scale_map = data[3];
+	fifo_map = data[5];
+	active_map = data[7];
 	stl_rd32_cmd(sl, 0x40006640, 32);
 	for (i = 0; i < 28; i++)
 		if (active_map & (1<<i)) {
 			printf("  Filter %d FIFO %c ", i, fifo_map & (1<<i) ? '1' : '0');
 			if (scale_map & (1<<i))
 				printf("%8.8x %8.8x\n",
-					   result[i*2], result[i*2 + 1]);
+					   data[i*2], data[i*2 + 1]);
 			else
 				printf("%4.4x %4.4x (%3.3x %3.3x) %4.4x %4.4x (%3.3x %3.3x)\n",
-					   result[i*2] & 0xffff, result[i*2] >> 16,
-					   (result[i*2] >> 5) & 0x7ff, (result[i*2] >> 21) & 0x7ff,
-					   result[i*2 + 1] & 0xffff, result[i*2 + 1] >> 16,
-					   (result[i*2+1]>>5) & 0x7ff, (result[i*2+1]>>21) & 0x7ff);
+					   data[i*2] & 0xffff, data[i*2] >> 16,
+					   (data[i*2] >> 5) & 0x7ff, (data[i*2] >> 21) & 0x7ff,
+					   data[i*2 + 1] & 0xffff, data[i*2 + 1] >> 16,
+					   (data[i*2+1]>>5) & 0x7ff, (data[i*2+1]>>21) & 0x7ff);
 		}
 
 	return;
 }
-uint32_t DMA_addr_map[] = {0, 0x40020000, 0x40020400};
 
-static void stm_show_DMA(struct stlink* sl, unsigned int dma_num)
+static void stm_show_DMA(struct stlink* sl, struct dev_peripheral *dp,
+						 uint32_t data[])
 {
-	uint32_t *result = (void*)sl->data_buf;
 	int i;
-
-	if (dma_num >= (sizeof DMA_addr_map / sizeof DMA_addr_map[0])) {
-		printf("Invalid DMA controller number.\n");
-		return;
-	}
-	stl_rd32_cmd(sl, DMA_addr_map[dma_num], 8 + 20*7);
-	printf("DMA %d at %8.8x: interrupts %8.8x %8.8x\n",
-		   dma_num, DMA_addr_map[dma_num], result[0], result[1]);
-	for (i = 1; i < 7; i++) {
+	printf("%s at %8.8x: interrupts %8.8x %8.8x\n",
+		   dp->name, dp->addr, data[0], data[1]);
+	for (i = 1; i <= 7; i++) {
 		int cb = i*5-3;
-		printf(" Channel %d: %8.8x %8.8x %8.8x->%8.8x\n",
-			   i, result[cb], result[cb+1], result[cb+2], result[cb+3]);
+		printf(" Channel %d: %8.8x  %d words %8.8x%s%s %8.8x%s\n",
+			   i, data[cb], data[cb+1],
+			   data[cb+2], data[cb] & 0x40 ? "++" : "  ",
+			   data[cb] & 0x10 ? "<-" : "->",
+			   data[cb+3], data[cb] & 0x80 ? "++" : "  ");
 	}
 	return;
+}
+
+static void stm_show_SPI(struct stlink* sl, struct dev_peripheral *dp,
+						 uint32_t data[])
+{
+	printf("%s at %8.8x: %8.8x %8.8x\n",
+		   dp->name, dp->addr, data[0], data[1]);
+}
+
+static void stm_show_USART(struct stlink* sl, struct dev_peripheral *dp,
+							 uint32_t data[])
+{
+	printf("%s at %8.8x: %4.4x %4.4x %4.4x %4.4x %4.4x %4.4x %4.4x %4.4x\n",
+		   dp->name, dp->addr, data[0], data[1], data[2], data[3],
+		   data[4], data[5], data[6], data[7]);
+}
+
+static void arm_show_systick(struct stlink* sl, struct dev_peripheral *dp,
+							 uint32_t data_blk[])
+{
+	printf("SysTick at %8.8x: Ctrl %4.4x reload %d, count %d\n"
+		   "  calibration %d (%#x)\n",
+		   dp->addr, data_blk[0], data_blk[1], data_blk[2],
+		   data_blk[3] & 0x00ffffff, data_blk[3]);
+}
+
+static void stm_show_dev(struct stlink* sl, struct dev_peripheral *dp,
+							 uint32_t data[])
+{
+	int i;
+	printf("%s at %8.8x:", dp->name, dp->addr);
+	for (i = 0; i < dp->extent/4; i++)
+		printf(" %4.4x", data[i]);
+	printf("\n");
+}
+
+struct dev_peripheral dev_per[] = {
+	{"SysTick", 0xE000E010, 0, arm_show_systick, 16},
+	{"CAN1", 0x40006400, 1, stm_show_CAN, 32},
+	{"CAN2", 0x40006800, 2, stm_show_CAN, 32},
+	{"DMA1", 0x40020000, 1, stm_show_DMA, 8 + 20*7},
+	{"DMA2", 0x40020400, 2, stm_show_DMA, 8 + 20*7},
+	{"PORTA", 0x40010800, 0, stm_show_dev, 28},
+	{"PORTB", 0x40010C00, 0, stm_show_dev, 28},
+	{"PORTC", 0x40011000, 0, stm_show_dev, 28},
+	{"PORTD", 0x40011400, 0, stm_show_dev, 28},
+	{"PORTE", 0x40011800, 0, stm_show_dev, 28},
+	{"PORTF", 0x40011C00, 0, stm_show_dev, 28},
+	{"PORTG", 0x40012000, 0, stm_show_dev, 28},
+	{"SPI1", 0x40013000, 1, stm_show_SPI, 36},
+	{"SPI2", 0x40003800, 2, stm_show_SPI, 36},
+	{"SPI3", 0x40003C00, 3, stm_show_SPI, 36},
+	{"TIM1", 0x40012C00, 1, stm_show_timer, 76}, /* Do not read TIMx_DMAR */
+	{"TIM1a",0x40010000, 1, stm_show_timer, 76}, /* 32F4xx only */
+	{"TIM2", 0x40000000, 2, stm_show_timer, 76},
+	{"TIM3", 0x40000400, 3, stm_show_timer, 76},
+	{"TIM4", 0x40000800, 4, stm_show_timer, 76},
+	{"TIM5", 0x40000C00, 5, stm_show_timer, 76},
+	{"TIM6", 0x40001000, 6, stm_show_timer, 76},
+	{"TIM7", 0x40001400, 7, stm_show_timer, 76},
+	{"TIM8", 0x40010400, 8, stm_show_timer, 76}, 	/* 32F4xx */
+	{"TIM9", 0x40014000, 9, stm_show_timer, 76}, 	/* 32F4xx */
+	{"TIM10", 0x40014400, 10, stm_show_timer, 76}, /* 32F4xx */
+	{"TIM11", 0x40014800, 11, stm_show_timer, 76}, /* 32F4xx */
+	{"TIM12", 0x40001800, 12, stm_show_timer, 76},
+	{"TIM13", 0x40001C00, 13, stm_show_timer, 76},
+	{"TIM14", 0x40002000, 14, stm_show_timer, 76},
+	{"TIM15", 0x40014000, 15, stm_show_timer, 76},
+	{"TIM16", 0x40014400, 16, stm_show_timer, 76},
+	{"TIM17", 0x40014800, 17, stm_show_timer, 76},
+	{"USART1", 0x40013800, 1, stm_show_USART, 7*4},
+	{"USART2", 0x40004400, 2, stm_show_USART, 7*4},
+	{"USART3", 0x40004800, 3, stm_show_USART, 7*4},
+	{"USART4", 0x40004C00, 4, stm_show_USART, 7*4},
+	{"USART5", 0x40005000, 5, stm_show_USART, 7*4},
+	{"USART1a", 0x40011000, 1, stm_show_USART, 7*4}, /* 32F4xx */
+	{"USART6", 0x40011400, 6, stm_show_USART, 7*4},
+	{"I2C1", 0x40005400, 1, stm_show_dev, 36},
+	{"I2C2", 0x40005800, 2, stm_show_dev, 36},
+	{"I2C3", 0x40005C00, 3, stm_show_dev, 36},
+	{"DAC",  0x40007400, 3, stm_show_dev, 56},
+#if 0
+	{"I2S2", 0x40003400, 2, stm_show_dev, 0},
+	{"RTC", 0x40002800, 0, stm_show_RTC, 0},
+	{"WWDG", 0x40002C00, 0, stm_show_WWDG, 0},
+	{"IWDG", 0x40003000, 0, stm_show_IWDG, 0},
+#endif
+};
+
+static int stm32_dev_show(struct stlink* sl, const char *cmd_name)
+{
+	int i;
+	for (i = 0; i < sizeof(dev_per)/sizeof(dev_per[0]); i++) {
+		struct dev_peripheral *dp = &dev_per[i];
+		if (strcasecmp(dp->name, cmd_name) == 0) {
+			uint32_t *result = (void*)sl->data_buf;
+			if (dp->extent)
+				stl_rd32_cmd(sl, dp->addr, dp->extent);
+			dp->show_func1(sl, dp, result);
+			return 0;
+		}
+	}
+	return -1;
 }
 
 struct stlink *stl_usb_scan(struct stlink *sl, const char *dev_name)
@@ -1735,7 +1839,8 @@ int main(int argc, char *argv[])
 	stl_kick_mode(sl);
 	stl_enter_SWD_mode(sl);
 	if (stl_mode(sl) != STLinkDevMode_Debug) {
-		fprintf(stderr, "Warning: Failed to switch the STLink into debug mode.\n");
+		fprintf(stderr, "Warning: Failed to switch the STLink into "
+				"debug mode.\n");
 	}
 
 	/* At this point we have identified a working STLink programmer.
@@ -1884,20 +1989,9 @@ int main(int argc, char *argv[])
 			printf("Result of Commmand12 is %2.2x.\n",
 				   stlink_cmd(sl, 0x0c, 0, 0));
 		}
-		/* Next, some ad hoc debugging commands. */
-		else if (strncmp("timer", cmd, 5) == 0) {
-			/* Read a timer's state. */
-			int timer_num = strtoul(cmd+5, 0, 0); /* Super sleazy */
-			stm_show_timer(sl, timer_num);
-		}
-		else if (strcmp("CAN1", cmd) == 0 || strcmp("CAN2", cmd) == 0) {
-			/* Show the CAN controller state. */
-			int can_num = cmd[3] - '0';
-			stm_show_CAN(sl, can_num);
-		}
-		else if (strcmp("DMA1", cmd) == 0 || strcmp("DMA2", cmd) == 0) {
-			/* Show the DMA controller state. */
-			stm_show_DMA(sl, cmd[3] - '0');
+		/* Some ad hoc device register display commands. */
+		else if (stm32_dev_show(sl, cmd) == 0) {
+			;			/* dev_show() has already done the work.  */
 		}
 		else {
 			fprintf(stderr, "Unrecognized command '%s'.\n", cmd);
