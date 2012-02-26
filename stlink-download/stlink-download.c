@@ -227,6 +227,11 @@ enum STLinkParamDirection {
  * milliseconds, with a more complex ones taking about 250 ms.
  */
 #define TIMEOUT_MSEC	800
+/* The maximum number of times to loop waiting for the flash page write
+ * program to finish.  This is under 50 cycles for a 1 millisecond USB 1.0
+ * poll, but takes 120-140 cycles for a 250 microsecond poll 
+ */
+#define FLASH_POLL_LIMIT 200
 
 /* The v1 device presents itself as a USB mass storage device.  Debug access
  * is through additional SCSI Command Descriptor Blocks (CDB) commands.
@@ -376,15 +381,14 @@ struct stlink {
 	unsigned char cmd_buf[CDB_SIZE];
 	int data_len;
 	unsigned char data_buf[Q_BUF_LEN];
-	/* Older names, still used. */
-	unsigned char scsi_cmd_blk[CDB_SIZE];
-	/* Sense (error information) data */
-	unsigned char sense_buf[SENSE_BUF_LEN];
-	int q_len;
-	unsigned char q_buf[Q_BUF_LEN];
+	/* The older names were:
+	 * scsi_cmd_blk[]/cmd_len is now cmd_buf[]/cmd_len
+	 * q_buf[]/q_len is now data_buf[]/data_len
+	 * sense_buf is mostly passed-and-ignored and locally declared
+	 */
 };
 
-int stl_do_scsi_op(struct stlink *stl, int sg_xfer_dir);
+int stl_do_cmd(struct stlink *stl);
 
 // Endianness
 // http://www.ibm.com/developerworks/aix/library/au-endianc/index.html
@@ -498,38 +502,43 @@ void stl_close(struct stlink *sl)
  */
 void st_gcmd(struct stlink *sl, uint8_t st_cmd0, uint8_t st_cmd1, int resp_len)
 {
-	sl->scsi_cmd_blk[0] = st_cmd0;
-	sl->scsi_cmd_blk[1] = st_cmd1;
+	sl->cmd_buf[0] = st_cmd0;
+	sl->cmd_buf[1] = st_cmd1;
 	sl->cmd_len = 2;
-	sl->q_len = resp_len;
-	stl_do_scsi_op(sl, SG_DXFER_FROM_DEV);
+	sl->data_len = resp_len;
+	sl->xfer_dir = STLinkParamFromDev;
+	stl_do_cmd(sl);
 	return;
 }
 
 #define stl_get_version(sl) st_gcmd(sl, STLinkGetVersion, 0, 6)
 #define stl_mode(sl) (st_gcmd(sl, STLinkGetCurrentMode, 0, 2), \
-					  *(uint16_t *)sl->q_buf)
+					  *(uint16_t *)sl->data_buf)
 #define stl_exit_dfu_mode(sl) \
 	st_gcmd(sl, STLinkDFUCommand, STLinkDFUModeExit, 0)
 
 /* Execute a regular-form STLink Debug command.
  * This is the generic operation for most simple commands.
  */
-int stlink_cmd(struct stlink *sl, uint8_t st_cmd1, uint8_t st_cmd2, int q_len)
+int stlink_cmd(struct stlink *sl, uint8_t st_cmd1, uint8_t st_cmd2,
+			   int response_len)
 {
 #if 0
-	memset(sl->scsi_cmd_blk, 0x55, sizeof(sl->scsi_cmd_blk));
+	/* Deducing what the STLink v1 does often requires knowing how many
+	 * bytes were returned. */
+	memset(sl->cmd_buf, 0x55, sizeof(sl->cmd_buf));
 #endif
-	sl->scsi_cmd_blk[0] = STLinkDebugCommand;
-	sl->scsi_cmd_blk[1] = st_cmd1;
-	sl->scsi_cmd_blk[2] = st_cmd2;
-	sl->q_len = q_len;
-	memset(sl->q_buf, 0x55555555, q_len+12); /* Debugging only */
-	stl_do_scsi_op(sl, SG_DXFER_FROM_DEV);
-	if (q_len == 2)
-		return *(uint16_t *)sl->q_buf;
-	else if (q_len == 4)
-		return read_uint32(sl->q_buf, 0);
+	sl->cmd_buf[0] = STLinkDebugCommand;
+	sl->cmd_buf[1] = st_cmd1;
+	sl->cmd_buf[2] = st_cmd2;
+	sl->data_len = response_len;
+	sl->xfer_dir = STLinkParamFromDev;
+	memset(sl->data_buf, 0x55555555, response_len+12); /* Debugging only */
+	stl_do_cmd(sl);
+	if (response_len == 2)
+		return *(uint16_t *)sl->data_buf;
+	else if (response_len == 4)
+		return read_uint32(sl->data_buf, 0);
 	return 0;
 }
 
@@ -551,23 +560,23 @@ int stlink_cmd(struct stlink *sl, uint8_t st_cmd1, uint8_t st_cmd2, int q_len)
 #define stl_get_reg(sl, reg_idx) \
 	stlink_cmd(sl, STLinkDebugReadOneReg, (reg_idx), 4)
 
-/* These need extra data. */
+/* These commands need additional parameters. */
 #define stl_write_reg(sl, reg_val, reg_idx)	{			\
-		write_uint32(sl->scsi_cmd_blk + 3, (reg_val));		\
+		write_uint32(sl->cmd_buf + 3, (reg_val));		\
 		stlink_cmd(sl, STLinkDebugWriteReg, (reg_idx), 2);  \
 	}
 #define stl_set_fp(sl, fp_nr)  stlink_cmd(sl, STLinkDebugSetFP, fp_nr, 2)
 #define stl_set_breakpoint1(sl, fp_nr, addr, fptype) (	\
-	write_uint32(sl->scsi_cmd_blk+3, addr),			\
-	sl->scsi_cmd_blk[7] = fptype,							\
+	write_uint32(sl->cmd_buf+3, addr),			\
+	sl->cmd_buf[7] = fptype,							\
 	stlink_cmd(sl, STLinkDebugSetFP, fp_nr, 2))
 
 #define is_core_halted(sl)  (stl_get_status(sl) == STLINK_CORE_HALTED)
 
 /* Basic target memory read and write functions.
  * Both bulk and single 32 bit word functions are here.
- * The bulk version has the caller uses the SCSI buffer.
- * The 32 bit versions use function parameter and return data.
+ * The 32 bit versions use function parameters and return a value.
+ * The bulk version has the caller fill/empty sl->data_buf.
  */
 /* Write to the ARM memory starting at ADDR for LEN bytes.
  * The *_mem8 variant has a maximum LEN of 64 bytes.
@@ -575,23 +584,24 @@ int stlink_cmd(struct stlink *sl, uint8_t st_cmd1, uint8_t st_cmd2, int q_len)
  */
 static inline int stl_wr32_cmd(struct stlink* sl, uint32_t addr, uint16_t len)
 {
-	sl->scsi_cmd_blk[0] = STLinkDebugCommand;
+	sl->cmd_buf[0] = STLinkDebugCommand;
 	if ((len & 3) == 0)
-		sl->scsi_cmd_blk[1] = STLinkDebugWriteMem32bit;
+		sl->cmd_buf[1] = STLinkDebugWriteMem32bit;
 	else if (len < 64)
-		sl->scsi_cmd_blk[1] = STLinkDebugWriteMem8bit;
+		sl->cmd_buf[1] = STLinkDebugWriteMem8bit;
 	else
 		return -1;
-	write_uint32(sl->scsi_cmd_blk + 2, addr);
-	write_uint16(sl->scsi_cmd_blk + 6, len);
-	sl->q_len = len;
-
-	stl_do_scsi_op(sl, SG_DXFER_TO_DEV);
+	write_uint32(sl->cmd_buf + 2, addr);
+	write_uint16(sl->cmd_buf + 6, len);
+	sl->cmd_len = 8;
+	sl->data_len = len;
+	sl->xfer_dir = STLinkParamToDev;
+	stl_do_cmd(sl);
 	return 0;
 }
 static inline void sl_wr32(struct stlink* sl, uint32_t addr, uint32_t val)
 {
-	write_uint32(sl->q_buf, val);
+	write_uint32(sl->data_buf, val);
 	stl_wr32_cmd(sl, addr, sizeof(uint32_t));
 }
 
@@ -606,32 +616,37 @@ uint32_t stl_rd32_cmd(struct stlink* sl, uint32_t addr, uint16_t len)
 #if 1
 	/* This version forces alignment, which should never be needed as
 	 * calls always pass the correct alignment and size. */
-	write_uint32(sl->scsi_cmd_blk + 2, addr & ~3);
-	write_uint16(sl->scsi_cmd_blk + 6, (len+3) & ~3);
+	write_uint32(sl->cmd_buf + 2, addr & ~3);
+	write_uint16(sl->cmd_buf + 6, (len+3) & ~3);
 #else
 	/* This version adds one to compensate for a STLink bug that causes
 	 * a residue error.  However it causes incorrect results with some
 	 * combinations of kernel and virtual machine hypervisors.
 	 */
-	write_uint32(sl->scsi_cmd_blk + 2, addr);
-	write_uint16(sl->scsi_cmd_blk + 6, len+1);
+	write_uint32(sl->cmd_buf + 2, addr);
+	write_uint16(sl->cmd_buf + 6, len+1);
 #endif
 	stlink_cmd(sl, STLinkDebugReadMem32bit, addr, len);
-	return *(uint32_t*)sl->q_buf;
+	return *(uint32_t*)sl->data_buf;
 }
 static inline uint32_t sl_rd32(struct stlink *sl, uint32_t addr)
 {
 	stl_rd32_cmd(sl, addr, sizeof(uint32_t));
-	return *(uint32_t*)sl->q_buf;
+	return *(uint32_t*)sl->data_buf;
 }
 
 #if defined(linux)
-/* Enqueue a command to the SCSI Generic driver.
+/* Enqueue a command to the STLink.
+ * v1 uses SCSI transport over USB.
  * Most of the work is filling in the struct sg_io_hdr.
+ * stl->cmd_buf
+ * stl->data_buf, stl->data_len
  */
-int stl_do_scsi_op(struct stlink *stl, int sg_xfer_dir)
+int stl_do_cmd(struct stlink *stl)
 {
     struct sg_io_hdr io_hdr = {0,};
+	/* Sense (error information) data */
+	unsigned char sense_buf[SENSE_BUF_LEN];
 	int ret;
 
 	io_hdr.interface_id = 'S';
@@ -641,17 +656,18 @@ int stl_do_scsi_op(struct stlink *stl, int sg_xfer_dir)
 	 * The Request Sense (error info) command is used for responses.
 	 * http://en.wikipedia.org/wiki/SCSI_Request_Sense_Command
 	 */
-	io_hdr.cmdp = stl->scsi_cmd_blk;
-	io_hdr.cmd_len = sizeof(stl->scsi_cmd_blk);
-	io_hdr.sbp = stl->sense_buf;
-	io_hdr.mx_sb_len = sizeof(stl->sense_buf);
+	io_hdr.cmdp = stl->cmd_buf;
+	io_hdr.cmd_len = sizeof(stl->cmd_buf);
+	io_hdr.sbp = sense_buf;
+	io_hdr.mx_sb_len = sizeof(sense_buf);
 	memset(io_hdr.sbp, 0, io_hdr.sb_len_wr);
 
 	/* Set a buffer to be used for data transferred from/to device */
 	io_hdr.iovec_count = 0;
-	io_hdr.dxferp = stl->q_buf;
-	io_hdr.dxfer_len = stl->q_len;
-	io_hdr.dxfer_direction = sg_xfer_dir;
+	io_hdr.dxferp = stl->data_buf;
+	io_hdr.dxfer_len = stl->data_len;
+	io_hdr.dxfer_direction =
+		(stl->xfer_dir == STLinkParamToDev ? SG_DXFER_TO_DEV:SG_DXFER_FROM_DEV);
 
 	io_hdr.timeout = TIMEOUT_MSEC;
 	io_hdr.flags = 0;
@@ -702,12 +718,14 @@ SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER sptdwb;
 /* Enqueue a command to the SCSI Generic driver.
  * Most of the work is filling in the struct sg_io_hdr.
  */
-int stl_do_scsi_op(struct stlink *stl, int sg_xfer_dir)
+int stl_do_cmd(struct stlink *stl)
 {
    int ret;
    DWORD junk;                   // discard results
    int length;
    int i;
+   /* Sense (error information) data */
+   unsigned char sense_buf[SENSE_BUF_LEN];
 
    length = sizeof(SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER);
 
@@ -717,15 +735,16 @@ int stl_do_scsi_op(struct stlink *stl, int sg_xfer_dir)
    sptdwb.sptd.PathId = 0;
    sptdwb.sptd.TargetId = 1;
    sptdwb.sptd.Lun = 0;
-   sptdwb.sptd.CdbLength = sizeof(stl->scsi_cmd_blk);
-   sptdwb.sptd.DataIn = sg_xfer_dir;
+   sptdwb.sptd.CdbLength = sizeof(stl->cmd_buf);
+   sptdwb.sptd.DataIn = stl->xfer_dir;
    sptdwb.sptd.SenseInfoLength = 0;
-   sptdwb.sptd.DataTransferLength = stl->q_len;
+   sptdwb.sptd.DataTransferLength = stl->data_len;
+   /* With only full-second granularity, use a full 1 second timeout. */
    sptdwb.sptd.TimeOutValue = SG_TIMEOUT_MSEC/1000 + 1;
-   sptdwb.sptd.DataBuffer = stl->q_buf;
+   sptdwb.sptd.DataBuffer = stl->data_buf;
    sptdwb.sptd.SenseInfoOffset =
       offsetof(SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER,ucSenseBuf);
-   memcpy(sptdwb.sptd.Cdb, stl->scsi_cmd_blk, sizeof(stl->scsi_cmd_blk));
+   memcpy(sptdwb.sptd.Cdb, stl->cmd_buf, sizeof(stl->cmd_buf));
 
    ret = DeviceIoControl(stl->fd,                 /* device to be queried */
                IOCTL_SCSI_PASS_THROUGH_DIRECT,    /* operation to perform */
@@ -738,14 +757,14 @@ int stl_do_scsi_op(struct stlink *stl, int sg_xfer_dir)
            fprintf(stderr,"DeviceIoControl failed. Error %ld.\n",
 GetLastError ());
    }
-   memcpy(stl->sense_buf, sptdwb.ucSenseBuf, sptdwb.sptd.SenseInfoLength);
+   memcpy(sense_buf, sptdwb.ucSenseBuf, sptdwb.sptd.SenseInfoLength);
 
    /* Report SCSI results.  Really, note useful variable if we need
     * to write better reporting code. */
    if (stl->verbose) {
        if (sptdwb.sptd.SenseInfoLength)
-           fprintf(stderr, " sense length %d.\n",
-               sptdwb.sptd.SenseInfoLength);
+           fprintf(stderr, " sense length %d [%2.2x %2.2x ... ].\n",
+				   sptdwb.sptd.SenseInfoLength, sense_buf[0], sense_buf[1]);
    }
    return ret;
 }
@@ -794,8 +813,8 @@ void stlink_print_arm_regs(struct ARMcoreRegs *regs)
  */
 int stl_set_breakpoint(struct stlink *sl, int fp_nr, uint32_t addr, int fp)
 {
-	write_uint32(sl->q_buf+3, addr);
-	sl->q_buf[7] = fp;
+	write_uint32(sl->data_buf+3, addr);
+	sl->data_buf[7] = fp;
 	return stl_set_fp(sl, fp_nr);
 }
 
@@ -983,9 +1002,9 @@ static int stl_loader(struct stlink *sl, stm32_addr_t flash_addr,
 	uint32_t prog_base = stm_devids[0].sram_base;
 	uint32_t *params;
 
-	memcpy(sl->q_buf, db_loader_code, sizeof(db_loader_code));
+	memcpy(sl->data_buf, db_loader_code, sizeof(db_loader_code));
 	offset = sizeof(db_loader_code);
-	params = (uint32_t *)(sl->q_buf+offset);
+	params = (uint32_t *)(sl->data_buf+offset);
 
 	/* Write params[-4] to change the FLASH_REGS_ADDR base.
 	 * Connectivity devices use an offset of +0x40 e.g. 0x40022040
@@ -1037,7 +1056,7 @@ static int stl_flash_write(struct stlink *sl, stm32_addr_t flash_addr,
 		stl_loader(sl, flash_addr + offset, buf + offset, this_size);
 		/* Writing 2KB takes 40-70 msec according to sec. 5.3.9 */
 		while (stl_get_status(sl) != STLINK_CORE_HALTED)
-			if (++failcount > 70*4) {
+			if (++failcount > FLASH_POLL_LIMIT) {
 				if (sl->verbose)
 					printf("Flash status %2.2x, control %4.4x status %x.\n",
 						   sl_rd32(sl, FLASH_SR), sl_rd32(sl, FLASH_CR),
@@ -1123,7 +1142,7 @@ int stl_read(struct stlink* sl, stm32_addr_t addr, void *buf, ssize_t size)
 	if (addr & 3) {
 		int psz = 4 - (addr & 3);
 		stl_rd32_cmd(sl, addr & ~3, sizeof(uint32_t));
-		memcpy(buf, sl->q_buf + (addr & 3), psz);
+		memcpy(buf, sl->data_buf + (addr & 3), psz);
 		offset = psz;
 	}
 	do {
@@ -1135,7 +1154,7 @@ int stl_read(struct stlink* sl, stm32_addr_t addr, void *buf, ssize_t size)
 		stl_rd32_cmd(sl, addr+offset, xfer_size);
 		if (size & 3)
 			xfer_size = size;
-		memcpy(buf + offset, sl->q_buf, xfer_size);
+		memcpy(buf + offset, sl->data_buf, xfer_size);
 		offset += xfer_size;
 		size -= xfer_size;
 	} while (size > 0);
@@ -1317,7 +1336,7 @@ static int stl_fread(struct stlink* sl, const char* path,
 
 		stlink_read_mem32(sl, addr + off, read_size);
 
-		if (write(fd, sl->q_buf, read_size) != (ssize_t)read_size) {
+		if (write(fd, sl->data_buf, read_size) != (ssize_t)read_size) {
 			fprintf(stderr, "write() != read_size\n");
 			close(fd);
 			return -1;
@@ -1348,9 +1367,11 @@ int stl_kick_mode(struct stlink *sl)
 
 	if (sl->verbose) {
 		sl->core_state = stl_get_status(sl);
-		printf("ARM status is 0x%4.4x: %s.\n", sl->core_state,
-			   sl->core_state==STLINK_CORE_RUNNING ? "running" :
-			   (sl->core_state==STLINK_CORE_HALTED ? "halted" : "unknown"));
+		fprintf(stderr, " STLink mode is %4.4x.\n"
+				" ARM status is 0x%4.4x: %s.\n",
+				stlink_mode, sl->core_state,
+				sl->core_state==STLINK_CORE_RUNNING ? "running" :
+				(sl->core_state==STLINK_CORE_HALTED ? "halted" : "unknown"));
 	}
 
 
@@ -1394,18 +1415,35 @@ int stl_kick_mode(struct stlink *sl)
 
 static void stm_info(struct stlink* sl)
 {
-	uint32_t devparam;
+	uint32_t idcode, devparam;
+	int i;
+
+	idcode = sl_rd32(sl, DBGMCU_IDCODE); 			/* At 0xE0042000 */
+	if (idcode == 0)								/* Cortex-M0 */
+		idcode = sl_rd32(sl, 0x40015800);
+		
+	for (i = 0; stm_devids[i].name; i++)
+		if (idcode == stm_devids[i].dbgmcu_idcode) {
+			sl->chip_index = i;
+			break;
+		}
+
+	printf(" Target DBGMC_IDCODE %3.3x (Rev ID %4.4x) %s.\n",
+		   idcode & 0x0FFF, idcode, stm_devids[sl->chip_index].name);
 
 	/* Read the device parameters: flash size and serial number. */
+	/* The STM32F1 has the flash size at 0x1FFFf7e0. */
 	devparam = sl_rd32(sl, 0x1FFFf7e0);
+	sl->flash_mem_size = devparam & 0xff;
+	if (sl->flash_mem_size == 0xff)
+		/* The STM32F2 and STM32F4 have the flash size at 0x1FFF7A22. */
+		sl->flash_mem_size = sl_rd32(sl, 0x1FFF7A22);
+
 	printf("Flash size %dK (register %4.4x).\n",
 		   devparam & 0xff, devparam);
-	printf("Information block %8.8x %8.8x %8.8x %8.8x.\n",
+	printf("  Information block %8.8x %8.8x %8.8x %8.8x.\n",
 		   sl_rd32(sl, 0x1FFFf800), sl_rd32(sl, 0x1FFFf804),
 		   sl_rd32(sl, 0x1FFFf808), sl_rd32(sl, 0x1FFFf80c));
-	devparam = sl_rd32(sl, 0xE0042000);
-	printf("DBGMC_IDCODE %3.3x (Rev ID %4.4x).\n",
-		   devparam & 0x0FFF, devparam);
 	return;
 }
 
@@ -1480,7 +1518,7 @@ uint32_t timer_addr_map[] = {
 	
 static void stm_show_timer(struct stlink* sl, unsigned int timer_num)
 {
-	uint32_t *result = (void*)sl->q_buf;
+	uint32_t *result = (void*)sl->data_buf;
 	uint32_t timer_addr;
 	char active_map[4] = " H L";
 
@@ -1493,8 +1531,8 @@ static void stm_show_timer(struct stlink* sl, unsigned int timer_num)
 		printf("Invalid timer number.\n");
 		return;
 	}
-	write_uint32(sl->scsi_cmd_blk + 2, timer_addr);
-	write_uint16(sl->scsi_cmd_blk + 6, 81);
+	write_uint32(sl->cmd_buf + 2, timer_addr);
+	write_uint16(sl->cmd_buf + 6, 81);
 	stlink_cmd(sl, STLinkDebugReadMem32bit, timer_addr, 80);
 	printf("Timer %d at %8.8x: %8.8x %8.8x %8.8x %8.8x.\n"
 		   "%8.8x %8.8x %8.8x %8.8x.\n"
@@ -1513,7 +1551,7 @@ uint32_t CAN_addr_map[] = {0, 0x40006400, 0x40006800};
 
 static void stm_show_CAN(struct stlink* sl, unsigned int can_num)
 {
-	uint32_t *result = (void*)sl->q_buf;
+	uint32_t *result = (void*)sl->data_buf;
 	uint32_t mode_map, scale_map, fifo_map, active_map;
 	int i;
 
@@ -1574,7 +1612,7 @@ uint32_t DMA_addr_map[] = {0, 0x40020000, 0x40020400};
 
 static void stm_show_DMA(struct stlink* sl, unsigned int dma_num)
 {
-	uint32_t *result = (void*)sl->q_buf;
+	uint32_t *result = (void*)sl->data_buf;
 	int i;
 
 	if (dma_num >= (sizeof DMA_addr_map / sizeof DMA_addr_map[0])) {
@@ -1596,7 +1634,7 @@ uint32_t USART_addr_map[] = {
 	0, 0x40013800, 0x40004400, 0x40004800, 0x40004C00, 0x40005000,};
 static void stm_show_USART(struct stlink* sl, unsigned int usart_num)
 {
-	uint32_t *result = (void*)sl->q_buf;
+	uint32_t *result = (void*)sl->data_buf;
 
 	if (usart_num >= (sizeof USART_addr_map / sizeof USART_addr_map[0])) {
 		printf("Invalid USART controller number.\n");
@@ -1660,7 +1698,7 @@ int main(int argc, char *argv[])
 	}
 
 	stl_get_version(sl);
-	sl->ver = *(struct STLinkVersion *)sl->q_buf;
+	sl->ver = *(struct STLinkVersion *)sl->data_buf;
 	if (sl->ver.ST_VendorID == 0 && sl->ver.ST_ProductID == 0) {
 		fprintf(stderr, "The device %s is reporting an ID of 0/0.\n"
 				"  Either the STLink is not plugged in or it is still "
@@ -1712,7 +1750,7 @@ int main(int argc, char *argv[])
 		if (strcmp("regs", cmd) == 0) {
 			/* We must be stopped for this to work! */
 			stl_get_allregs(sl);
-			sl->reg = *(struct ARMcoreRegs*)sl->q_buf;
+			sl->reg = *(struct ARMcoreRegs*)sl->data_buf;
 			stlink_print_arm_regs(&sl->reg);
 		} else if (strncmp("reg", cmd, 3) == 0) {
 			/* We must be stopped for this to work! */
@@ -1746,9 +1784,9 @@ int main(int argc, char *argv[])
 		} else if (strncmp("read", cmd, 4) == 0) {
 			/* Read memory location */
 			int memaddr = strtoul(cmd+4, 0, 0); /* Super sleazy */
-			uint32_t *result = (void*)sl->q_buf;
-			write_uint32(sl->scsi_cmd_blk + 2, memaddr);
-			write_uint16(sl->scsi_cmd_blk + 6, 17);
+			uint32_t *result = (void*)sl->data_buf;
+			write_uint32(sl->cmd_buf + 2, memaddr);
+			write_uint16(sl->cmd_buf + 6, 17);
 			stlink_cmd(sl, STLinkDebugReadMem32bit, memaddr, 16);
 			printf("Memory %8.8x is %8.8x %8.8x %8.8x %8.8x.\n",
 				   memaddr, result[0], result[1], result[2], result[3]);
@@ -1807,7 +1845,7 @@ int main(int argc, char *argv[])
 			stl_reset(sl);
 		} else if (strcmp("version", cmd) == 0) {
 			stl_get_version(sl);
-			sl->ver = *(struct STLinkVersion *)sl->q_buf;
+			sl->ver = *(struct STLinkVersion *)sl->data_buf;
 			stl_print_version(&sl->ver);
 		} else if (strcmp("debug", cmd) == 0) {
 			stl_enter_debug(sl);
