@@ -86,13 +86,18 @@ Usage notes:
 #include <windows.h>
 enum SCSI_Generic_Direction {SG_DXFER_TO_DEV=0, SG_DXFER_FROM_DEV=1};
 
+#elif defined(__APPLE__)
+/* We have only the libusb API on Apple OSX. */
+#include <libusb-1.0/libusb.h>
 #else
 #error "No host OS defined."
 #endif
 
 /* $Vbase: 1.54 14 January 2011 00:25:11 becker$ */
 static const char version_msg[] =
-"STLink programmer/debugging utility $Id$  Copyright Donald Becker";
+	"STLink programmer/debugging utility, written by Donald Becker\n"
+	" $Id$\n"
+	" Built "__DATE__" from "__FILE__;
 
 static const char usage_msg[] =
 #if defined(__ms_windows__)
@@ -139,35 +144,63 @@ int verbose = 0;
  * you have to update.  But this tool is for microcontroller developers so
  * I have no qualms about being far more flexible.
  */
-#define DBGMCU_IDCODE 0xE0042000.	/* The MCU device ID. */
+#define DBGMCU_IDCODE 0xE0042000	/* The MCU device ID. */
 struct stm_chip_params {			/* Unused/placeholder parameter table. */
+	const char *name;
+	int cap_flags;				/* Bitmapped capability indicators. */
 	uint32_t core_id, dbgmcu_idcode;
 	uint32_t flash_base, flash_size, flash_pgsize;
 	uint32_t sysflash_base, sysflash_size, sysflash_pgsize;
 	uint32_t sram_base, sram_size;
 } stm_devids[] = {
 	/* Devices have 4k or 8k SRAM and 16k-128k flash. */
-	{ 0x1ba01477, 0x10016420,	/* STM32F100 on Discovery. */
+	{ "STM32", 0,				/* Generic fall-back. */
+	  0x1ba01477, 0x10000400,
 	  0x08000000, 128*1024, 1024,
 	  0x1ffff000, 2*1024, 1024,
 	  0x20000000, 8*1024},
-	{ 0x1ba01477, 0x10016412,	/* Low-density devices. */
+	{ "STM32F100", 0,
+	  0x1ba01477, 0x10016420,	/* STM32F100 on Discovery. */
+	  0x08000000, 128*1024, 1024,
+	  0x1ffff000, 2*1024, 1024,
+	  0x20000000, 8*1024},
+	{ "STM32F103R4T6", 0,
+	  0x1ba01477, 0x00005e7d,	/* Low-density devices. */
 	  0x08000000, 32*1024, 1024,
 	  0x1ffff000, 2*1024, 1024,
 	  0x20000000, 4*1024},
-	{ 0x1ba01477, 0x10016410,	/* Medium-density devices. */
+	{ "STM32F10x", 0,
+	  0x1ba01477, 0x10016412,	/* Low-density devices. */
+	  0x08000000, 32*1024, 1024,
+	  0x1ffff000, 2*1024, 1024,
+	  0x20000000, 4*1024},
+	{ "STM32F10x", 0,
+	  0x1ba01477, 0x10016410,	/* Medium-density devices. */
 	  0x08000000, 128*1024, 1024,
 	  0x1ffff000, 2*1024, 1024,
 	  0x20000000, 8*1024},
-	{ 0x1ba01477, 0x10016414,	/* High-density devices. */
+	{ "STM32F10x", 0,
+	  0x1ba01477, 0x10016414,	/* High-density devices. */
 	  0x08000000, 512*1024, 1024,
 	  0x1ffff000, 2*1024, 1024,
 	  0x20000000, 8*1024},
-	{ 0x1ba01477, 0x10016430,	/* XL-density devices. */
+	{ "STM32F10x", 0,
+	  0x1ba01477, 0x10016430,	/* XL-density devices. */
 	  0x08000000, 1024*1024, 2048,
 	  0x1fffe000, 6*1024, 1024,
 	  0x20000000, 8*1024},
-	{ 0x1ba01477, 0x10016418,	/* Connectivity devices. */
+	{ "STM32F107", 0,
+	  0x1ba01477, 0x10016418,	/* Connectivity devices. */
+	  0x08000000, 256*1024, 2048,
+	  0x1fffb000, 18*1024, 1024,
+	  0x20000000, 8*1024},
+	{ "STM32L152", 0,
+	  0x1ba01477, 0x10186416,	/* L152RBT6 as on 32L-Discovery. */
+	  0x08000000, 128*1024, 2048,
+	  0x1fffb000, 16*1024, 1024,
+	  0x20000000, 8*1024},
+	{ "STM32F4xx", 0,
+	  0x2ba01477, 0x10006420,	/* F4 (Cortex M4) devices. */
 	  0x08000000, 256*1024, 2048,
 	  0x1fffb000, 18*1024, 1024,
 	  0x20000000, 8*1024},
@@ -180,17 +213,29 @@ struct stm_chip_params {			/* Unused/placeholder parameter table. */
  */
 #define USB_ST_VID		0x0483
 #define USB_STLINK_PID	0x3744
+#define USB_STLINKv2_PID	0x3748
 
-/* The device presents itself as a USB mass storage device.  Debug access
+/* Commands specify a size and direction of additional data.
+ * We use the same mapping as SCSI Generic.
+ * {SG_DXFER_TO_DEV=0, SG_DXFER_FROM_DEV=1};
+ */
+enum STLinkParamDirection {
+	STLinkParamToDev=0, STLinkParamFromDev=1,
+};
+
+/* A command should complete in well under one second. Most take a few
+ * milliseconds, with a more complex ones taking about 250 ms.
+ */
+#define TIMEOUT_MSEC	800
+
+/* The v1 device presents itself as a USB mass storage device.  Debug access
  * is through additional SCSI Command Descriptor Blocks (CDB) commands.
  *  http://en.wikipedia.org/wiki/SCSI_CDB
  * We access these with the SCSI Generic (SG) mechanism.
- * The STLink appears to always use a 10 byte CDB.
- * A command should complete in well under one second. Most take a few
- * milliseconds, with a more complex ones taking about 250 ms.
+ * The STLink appears to always use a 10 byte CDB, so we use that as the
+ * buffer size for both v1 and v2.
  */
 #define CDB_SIZE		10
-#define SG_TIMEOUT_MSEC	800
 
 /* The SCSI Request Sense command is used to obtain sense data
  * (error information) from the target.
@@ -234,6 +279,8 @@ enum STLink_Device_Modes {		/* Response to STLinkGetCurrentMode */
 	STLinkDevMode_DFU=0,
 	STLinkDevMode_Mass=1,
 	STLinkDevMode_Debug=2,
+	STLinkDevMode_SWIM=3,
+	STLinkDevMode_Bootloader=4,
 	STLinkDFUModeExit=7,		/* Errrm, not really part of this set. */
 	STLinkDebugEnterSWD=0xA3,	/* Subcommand to STLinkDebugEnterMode */
 	STLinkDebugEnterJTAG=0x00,	/* Subcommand to STLinkDebugEnterMode */
@@ -245,6 +292,13 @@ enum STLink_JTAG_Cmds {
 	STLinkDebugEnterMode=0x20,	/* One of JTAG or SWD mode. */
 	STLinkDebugExit=0x21,
 	STLinkDebugReadCoreID=0x22,	/* Must be the first command. */
+	/* New interface commands.  Do not exit on v1? */ 
+	STLinkDebugUseAltAPI=0x30,
+	STLinkDebugAltAPIReadID=0x31,
+	STLinkDebugAltAPIResetTarget=0x32,
+	STLinkDebugAltAPIReadReg=0x33,
+	STLinkDebugAltAPIWriteReg=0x34,
+	STLinkDebugAltAPIReadAllRegs=0x3A,
 	/* The regular commands. */
 	STLinkDebugGetStatus=0x01,
 	STLinkDebugForceDebug=0x02,
@@ -258,7 +312,7 @@ enum STLink_JTAG_Cmds {
 	STLinkDebugRunCore=0x09,
 	STLinkDebugStepCore=0x0A,
 	STLinkDebugSetFP=0x0B,		/* Flash Patch breakpoint */
-	/* What is the missing command? */
+	/* Command12 is unknown.  It returns no data, and seems to be a NoOp */
 	STLinkDebugWriteMem8bit=0x0D,
 	STLinkDebugClearFP=0x0E,
 	STLinkDebugWriteDebugReg=0x0F,
@@ -294,14 +348,20 @@ typedef uint32_t stm32_addr_t;
 
 struct stlink {
 	const char *dev_path;
-#if defined(__ms_windows__)
+#if defined(__linux__) || defined(__APPLE__)
+	int fd;
+#if defined(USE_LIBUSB)
+	libusb_device_handle *usb_hand;
+#endif
+#elif defined(__ms_windows__)
 	HANDLE fd;
 #else
+#warning "Undefined OS."
 	int fd;
 #endif
 	int verbose;				/* A local copy of 'verbose'. */
 
-	int chip_index;				/* Index into chip table (below). */
+	int chip_index;				/* Index into stm_devids[], if known. */
 	int flash_mem_size;			/* Reported flash memory size in KB. */
 	stm32_addr_t flash_base;
 
@@ -311,6 +371,12 @@ struct stlink {
 	struct ARMcoreRegs reg;
 
 	/* Parameters for the SCSI data transfer blocks. */
+	enum STLinkParamDirection xfer_dir;
+	int cmd_len;
+	unsigned char cmd_buf[CDB_SIZE];
+	int data_len;
+	unsigned char data_buf[Q_BUF_LEN];
+	/* Older names, still used. */
 	unsigned char scsi_cmd_blk[CDB_SIZE];
 	/* Sense (error information) data */
 	unsigned char sense_buf[SENSE_BUF_LEN];
@@ -421,17 +487,21 @@ void stl_close(struct stlink *sl)
 #if defined(__ms_windows__)
 	CloseHandle(sl->fd);
 #else
-	close(sl->fd);
+	if (sl->fd >= 0)
+		close(sl->fd);
 #endif
 }
 
 /* Execute a general command, with arbitrary parameters.
- * The command has already been written into sl->scsi_cmd_blk[]. */
-void st_gcmd(struct stlink *sl, uint8_t st_cmd0, uint8_t st_cmd1, int q_len)
+ * This is only used for commands to the STLink device itself, not for
+ * commands to the target processor.
+ */
+void st_gcmd(struct stlink *sl, uint8_t st_cmd0, uint8_t st_cmd1, int resp_len)
 {
 	sl->scsi_cmd_blk[0] = st_cmd0;
 	sl->scsi_cmd_blk[1] = st_cmd1;
-	sl->q_len = q_len;
+	sl->cmd_len = 2;
+	sl->q_len = resp_len;
 	stl_do_scsi_op(sl, SG_DXFER_FROM_DEV);
 	return;
 }
@@ -583,7 +653,7 @@ int stl_do_scsi_op(struct stlink *stl, int sg_xfer_dir)
 	io_hdr.dxfer_len = stl->q_len;
 	io_hdr.dxfer_direction = sg_xfer_dir;
 
-	io_hdr.timeout = SG_TIMEOUT_MSEC;
+	io_hdr.timeout = TIMEOUT_MSEC;
 	io_hdr.flags = 0;
 	ret = ioctl(stl->fd, SG_IO, &io_hdr);
 	/* Report SCSI results.  Really, note useful variable if we need
@@ -598,7 +668,87 @@ int stl_do_scsi_op(struct stlink *stl, int sg_xfer_dir)
 	}
 	return ret;
 }
-#elif defined(MS_WINDOWS)
+#elif defined(__ms_windows__)
+/* Code written by Anto Eltchaninov */
+#define IOCTL_SCSI_PASS_THROUGH_DIRECT 0x4D014
+
+typedef struct _SCSI_PASS_THROUGH_DIRECT {
+   USHORT       Length;
+   UCHAR        ScsiStatus;
+   UCHAR        PathId;
+   UCHAR        TargetId;
+   UCHAR        Lun;
+   UCHAR        CdbLength;
+   UCHAR        SenseInfoLength;
+   UCHAR        DataIn;
+   ULONG        DataTransferLength;
+   ULONG        TimeOutValue;
+   PVOID        DataBuffer;
+   ULONG        SenseInfoOffset;
+   UCHAR        Cdb[16];
+} SCSI_PASS_THROUGH_DIRECT, *PSCSI_PASS_THROUGH_DIRECT;
+
+#pragma pack(push,4)
+typedef struct _SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER {
+   SCSI_PASS_THROUGH_DIRECT sptd;
+   ULONG             Filler;      // realign buffer to double word boundary
+   UCHAR             ucSenseBuf[SENSE_BUF_LEN];
+} SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER,
+*PSCSI_PASS_THROUGH_DIRECT_WITH_BUFFER;
+#pragma pack(pop)
+
+SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER sptdwb;
+
+/* Enqueue a command to the SCSI Generic driver.
+ * Most of the work is filling in the struct sg_io_hdr.
+ */
+int stl_do_scsi_op(struct stlink *stl, int sg_xfer_dir)
+{
+   int ret;
+   DWORD junk;                   // discard results
+   int length;
+   int i;
+
+   length = sizeof(SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER);
+
+   memset(&sptdwb, 0, length);
+
+   sptdwb.sptd.Length = sizeof(SCSI_PASS_THROUGH_DIRECT);
+   sptdwb.sptd.PathId = 0;
+   sptdwb.sptd.TargetId = 1;
+   sptdwb.sptd.Lun = 0;
+   sptdwb.sptd.CdbLength = sizeof(stl->scsi_cmd_blk);
+   sptdwb.sptd.DataIn = sg_xfer_dir;
+   sptdwb.sptd.SenseInfoLength = 0;
+   sptdwb.sptd.DataTransferLength = stl->q_len;
+   sptdwb.sptd.TimeOutValue = SG_TIMEOUT_MSEC/1000 + 1;
+   sptdwb.sptd.DataBuffer = stl->q_buf;
+   sptdwb.sptd.SenseInfoOffset =
+      offsetof(SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER,ucSenseBuf);
+   memcpy(sptdwb.sptd.Cdb, stl->scsi_cmd_blk, sizeof(stl->scsi_cmd_blk));
+
+   ret = DeviceIoControl(stl->fd,                 /* device to be queried */
+               IOCTL_SCSI_PASS_THROUGH_DIRECT,    /* operation to perform */
+                           &sptdwb, length,       /* input buffer */
+                           &sptdwb, length,       /* output buffer */
+                           &junk,                 /* # bytes returned */
+                           (LPOVERLAPPED) NULL);  /* synchronous I/O */
+   if (stl->verbose) {
+       if (!ret)
+           fprintf(stderr,"DeviceIoControl failed. Error %ld.\n",
+GetLastError ());
+   }
+   memcpy(stl->sense_buf, sptdwb.ucSenseBuf, sptdwb.sptd.SenseInfoLength);
+
+   /* Report SCSI results.  Really, note useful variable if we need
+    * to write better reporting code. */
+   if (stl->verbose) {
+       if (sptdwb.sptd.SenseInfoLength)
+           fprintf(stderr, " sense length %d.\n",
+               sptdwb.sptd.SenseInfoLength);
+   }
+   return ret;
+}
 #endif
 
 static void stl_print_version(struct STLinkVersion *ver)
@@ -885,8 +1035,9 @@ static int stl_flash_write(struct stlink *sl, stm32_addr_t flash_addr,
 		else
 			this_size = size;
 		stl_loader(sl, flash_addr + offset, buf + offset, this_size);
+		/* Writing 2KB takes 40-70 msec according to sec. 5.3.9 */
 		while (stl_get_status(sl) != STLINK_CORE_HALTED)
-			if (++failcount > 50) {
+			if (++failcount > 70*4) {
 				if (sl->verbose)
 					printf("Flash status %2.2x, control %4.4x status %x.\n",
 						   sl_rd32(sl, FLASH_SR), sl_rd32(sl, FLASH_CR),
@@ -1279,11 +1430,13 @@ static void stm_discovery_blink(struct stlink* sl)
 	/* Read APB2ENR and APB1ENR at 0x40021018-1F */
 	stl_read(sl, 0x40021018, APBnENR_orig, sizeof APBnENR_orig);
 
+	/* Future: Enable GPIO ports if needed. */
 	APB2ENR_orig = APBnENR_orig[0];  /* 0x40021018 */
 	APB1ENR_orig = APBnENR_orig[1];  /* 0x4002101C (yes, 1 is higher) */
 
 	if (sl->verbose)
-		fprintf(stderr, "GPIOC_CRH = 0x%08x", PortC_hi_iocfg);
+		fprintf(stderr, "GPIOC_CRH = 0x%08x, APB1ENR=%#08x, APB2ENR=%#08x\n",
+				PortC_hi_iocfg, APB1ENR_orig, APB2ENR_orig);
 
 	/* Make certain PC8/PC9 are GPIO outputs -- any speed will do. */
 	if ((PortC_hi_iocfg & 0xCC) != 0x00)
@@ -1417,12 +1570,50 @@ static void stm_show_CAN(struct stlink* sl, unsigned int can_num)
 	return;
 }
 
+uint32_t DMA_addr_map[] = {0, 0x40020000, 0x40020400};
+
+static void stm_show_DMA(struct stlink* sl, unsigned int dma_num)
+{
+	uint32_t *result = (void*)sl->q_buf;
+	int i;
+
+	if (dma_num >= (sizeof DMA_addr_map / sizeof DMA_addr_map[0])) {
+		printf("Invalid DMA controller number.\n");
+		return;
+	}
+	stl_rd32_cmd(sl, DMA_addr_map[dma_num], 8 + 20*7);
+	printf("DMA %d at %8.8x: interrupts %8.8x %8.8x\n",
+		   dma_num, DMA_addr_map[dma_num], result[0], result[1]);
+	for (i = 1; i < 7; i++) {
+		int cb = i*5-3;
+		printf(" Channel %d: %8.8x  %d bytes %8.8x->%8.8x\n",
+			   i, result[cb], result[cb+1], result[cb+2], result[cb+3]);
+	}
+	return;
+}
+
+uint32_t USART_addr_map[] = {
+	0, 0x40013800, 0x40004400, 0x40004800, 0x40004C00, 0x40005000,};
+static void stm_show_USART(struct stlink* sl, unsigned int usart_num)
+{
+	uint32_t *result = (void*)sl->q_buf;
+
+	if (usart_num >= (sizeof USART_addr_map / sizeof USART_addr_map[0])) {
+		printf("Invalid USART controller number.\n");
+		return;
+	}
+	stl_rd32_cmd(sl, USART_addr_map[usart_num], 7*4);
+	printf("USART%d at %8.8x: %8.8x %8.8x %8.8x %8.8x\n",
+		   usart_num, USART_addr_map[usart_num],
+		   result[0], result[1], result[2], result[3]);
+	return;
+}
 
 int main(int argc, char *argv[])
 {
     char *program;				/* Program name without path. */
     int c, errflag = 0;
-	char *dev_name;				/* Path of SCSI device e.g. "/dev/stlink" */
+	char *dev_name;				/* Path of STLink device e.g. "/dev/stlink" */
 	char *upload_path = 0, *download_path = 0, *verify_path = 0;
 	int do_blink = 0;
 	int fd;
@@ -1468,8 +1659,6 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
-
-
 	stl_get_version(sl);
 	sl->ver = *(struct STLinkVersion *)sl->q_buf;
 	if (sl->ver.ST_VendorID == 0 && sl->ver.ST_ProductID == 0) {
@@ -1491,27 +1680,31 @@ int main(int argc, char *argv[])
 	if (sl->verbose)
 		stl_print_version(&sl->ver);
 
-	/* When we open the device it is likely in mass storage mode.
+	/* When we open the device it is in an unknown mode.
+	 * The v1 is likely in mass storage mode.
 	 * Switch to Single Wire Debug (SWD) mode and issue the required
 	 * first command, reading the core ID.
 	 */
 	stl_kick_mode(sl);
 	stl_enter_SWD_mode(sl);
-	if (stl_mode(sl) == STLinkDevMode_Debug) {
+	if (stl_mode(sl) != STLinkDevMode_Debug) {
+		fprintf(stderr, "Warning: Failed to switch the STLink into "
+				"debug mode.\n");
+	}
+
+	/* At this point we have identified a working STLink programmer.
+	 * We now check on the target chip ID and state.
+	 */
+	{
 		uint32_t core_id = stl_get_core_id(sl);
-		if (core_id != 0x1BA01477)
+		if (verbose)
+			printf("SWD core ID %8.8x, MCU ID is %8.8x.\n",
+				   core_id, sl_rd32(sl, DBGMCU_IDCODE));
+		if (core_id != 0x1BA01477 && core_id != 0x2BA01477)
 			fprintf(stderr, "Warning: SWD core ID %8.8x did not match the "
 					"expected value of %8.8x.\n", core_id, 0x1BA01477);
 	}
 
-#if 0
-	/* read the system bootloader */
-	if (upload_path) {
-		fprintf(stderr, " Reading ARM memory 0x%8.8x..0x%8.8x bytes into %s.\n",
-				sl->sys_base, sl->sys_base+sl->sys_size, upload_path);
-		stl_fread(sl, upload_path, sl->sys_base, sl->sys_size);
-	}
-#endif
 	while (argv[optind]) {
 		char *cmd = argv[optind];
 		if (verbose) printf("Executing command %s.\n", argv[optind]);
@@ -1641,8 +1834,8 @@ int main(int argc, char *argv[])
 			int memaddr = strtoul(cmd+7, 0, 0); /* Super sleazy */
 			uint32_t buf = 0x6524dbec;
 			stl_flash_write(sl, memaddr, &buf, sizeof buf);
-		} else if (strcmp("cmd13", cmd) == 0) {
-			printf("Result of Commmand13 is %2.2x.\n",
+		} else if (strcmp("cmd12", cmd) == 0) {
+			printf("Result of Commmand12 is %2.2x.\n",
 				   stlink_cmd(sl, 0x0c, 0, 0));
 		}
 		/* Next, some ad hoc debugging commands. */
@@ -1651,10 +1844,19 @@ int main(int argc, char *argv[])
 			int timer_num = strtoul(cmd+5, 0, 0); /* Super sleazy */
 			stm_show_timer(sl, timer_num);
 		}
-		else if (strcmp("CAN1", cmd) == 0 || strcmp("CAN2", cmd) == 0) {
+		else if (strcasecmp("CAN1", cmd) == 0 || strcasecmp("CAN2", cmd) == 0) {
 			/* Show the CAN controller state. */
 			int can_num = cmd[3] - '0';
 			stm_show_CAN(sl, can_num);
+		}
+		else if (strcasecmp("DMA1", cmd) == 0 || strcasecmp("DMA2", cmd) == 0) {
+			/* Show the DMA controller state. */
+			stm_show_DMA(sl, cmd[3] - '0');
+		}
+		else if (strncasecmp(cmd, "USARTn", 5) == 0 &&
+				 cmd[5] > '0' && cmd[5] < '6') {
+			/* Show the USART state. */
+			stm_show_USART(sl, cmd[3] - '0');
 		}
 		else {
 			fprintf(stderr, "Unrecognized command '%s'.\n", cmd);
