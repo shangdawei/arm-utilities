@@ -1944,25 +1944,9 @@ int main(int argc, char *argv[])
 			printf("Result of Commmand12 is %2.2x.\n",
 				   stlink_cmd(sl, 0x0c, 0, 0));
 		}
-		/* Next, some ad hoc debugging commands. */
-		else if (strncmp("timer", cmd, 5) == 0) {
-			/* Read a timer's state. */
-			int timer_num = strtoul(cmd+5, 0, 0); /* Super sleazy */
-			stm_show_timer(sl, timer_num);
-		}
-		else if (strcasecmp("CAN1", cmd) == 0 || strcasecmp("CAN2", cmd) == 0) {
-			/* Show the CAN controller state. */
-			int can_num = cmd[3] - '0';
-			stm_show_CAN(sl, can_num);
-		}
-		else if (strcasecmp("DMA1", cmd) == 0 || strcasecmp("DMA2", cmd) == 0) {
-			/* Show the DMA controller state. */
-			stm_show_DMA(sl, cmd[3] - '0');
-		}
-		else if (strncasecmp(cmd, "USARTn", 5) == 0 &&
-				 cmd[5] > '0' && cmd[5] < '6') {
-			/* Show the USART state. */
-			stm_show_USART(sl, cmd[3] - '0');
+		/* The table-driven peripheral device display commands. */
+		else if (stm32_dev_show(sl, cmd) == 0) {
+			;			/* dev_show() has already done the work.  */
 		}
 		else {
 			fprintf(stderr, "Unrecognized command '%s'.\n", cmd);
