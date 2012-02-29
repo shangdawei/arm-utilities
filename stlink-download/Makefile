@@ -24,7 +24,7 @@ flash-transfer.lst: flash-transfer.c
 	$(ARMCC) $(ARMCFLAGS) -c $< -Wa,-adhlns=$(<:.c=.lst)
 
 # You will likely need root permission to do this e.g. sudo
-install: stlink-download
+install: $(PRGS)
 	install -C -o root -g root -m 644 10-stlink.rules /etc/udev/rules.d/
 	install -m 755 $(PRGS) /usr/bin/
 
