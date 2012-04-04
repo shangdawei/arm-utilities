@@ -150,6 +150,10 @@ int verbose = 0;
  * I have no qualms about being far more flexible.
  */
 #define DBGMCU_IDCODE 0xE0042000	/* The MCU device ID. */
+
+enum chip_capabilities {
+	ChipCapF4Flash=1,
+};
 struct stm_chip_params {			/* Unused/placeholder parameter table. */
 	const char *name;
 	int cap_flags;				/* Bitmapped capability indicators. */
@@ -162,15 +166,25 @@ struct stm_chip_params {			/* Unused/placeholder parameter table. */
 	{ "STM32", 0,				/* Generic fall-back. */
 	  0x1ba01477, 0x10000400,
 	  0x08000000, 128*1024, 1024,
-	  0x1ffff000, 2*1024, 1024,
+	  0x1fffec00, 2*1024, 1024,
+	  0x20000000, 8*1024},
+	{ "STM32F051-R8T6", 0,
+	  0x0bb11477, 0x20006440,	/* STM32F051 on F0Discovery. */
+	  0x08000000, 64*1024, 1024,
+	  0x1fffec00, 8*1024, 1024,	/* Flash at 0x40022000 */
 	  0x20000000, 8*1024},
 	{ "STM32F100", 0,
-	  0x1ba01477, 0x10016420,	/* STM32F100 on Discovery. */
+	  0x1ba01477, 0x10016420,	/* STM32F100 on VLDiscovery. */
 	  0x08000000, 128*1024, 1024,
 	  0x1ffff000, 2*1024, 1024,
 	  0x20000000, 8*1024},
 	{ "STM32F103R4T6", 0,
 	  0x1ba01477, 0x00005e7d,	/* Low-density devices. */
+	  0x08000000, 32*1024, 1024,
+	  0x1ffff000, 2*1024, 1024,
+	  0x20000000, 4*1024},
+	{ "STM32F105RB", 0,
+	  0x3ba00477, 0x10016430,	/* XL-density device. */
 	  0x08000000, 32*1024, 1024,
 	  0x1ffff000, 2*1024, 1024,
 	  0x20000000, 4*1024},
@@ -204,7 +218,12 @@ struct stm_chip_params {			/* Unused/placeholder parameter table. */
 	  0x08000000, 128*1024, 2048,
 	  0x1fffb000, 16*1024, 1024,
 	  0x20000000, 8*1024},
-	{ "STM32F4xx", 0,
+	{ "STM32F407", ChipCapF4Flash,
+	  0x2ba01477, 0x20006411,	/* F4 (Cortex M4) devices. */
+	  0x08000000, 256*1024, 2048,
+	  0x1fffb000, 18*1024, 1024,
+	  0x20000000, 8*1024},
+	{ "STM32F4xx", ChipCapF4Flash,
 	  0x2ba01477, 0x10006420,	/* F4 (Cortex M4) devices. */
 	  0x08000000, 256*1024, 2048,
 	  0x1fffb000, 18*1024, 1024,
@@ -287,11 +306,17 @@ enum STLinkParamDirection {
 /* I have mostly converted my names to be similar to other code.
  * I started with gdb-friendly enums, so they do slightly differ.
  */
+/* STLink commands.
+ * 0xF1, 0xF3, and 0xF5 operate only on the STLink interface.
+ * 0xF2, 0xF4 and F6 are interact with the target MCU.
+ */
 enum STLink_Cmds {
-	STLinkGetVersion=0xF1,
-	STLinkDebugCommand=0xF2,
+	STLinkGetVersion=0xF1,		/* Returns 6 byte version structure */
+	STLinkDebugCommand=0xF2,	/* v1 commands for SWD+Cortex-M3 */
 	STLinkDFUCommand=0xF3,		/* Device/Direct Firmware Update */
-	STLinkGetCurrentMode=0xF5,
+	STLinkV2Command=0xF4,		/* Command set 2, used for the STM8 */
+	STLinkGetCurrentMode=0xF5,	/* Returns 2 byte STLink mode */
+	STLinkV3Command=0xF6,		/* Command set 3, used for the Cortex-M4 */
 };
 
 enum STLink_Device_Modes {		/* Response to STLinkGetCurrentMode */
@@ -312,7 +337,7 @@ enum STLink_JTAG_Cmds {
 	STLinkDebugEnterMode=0x20,	/* One of JTAG or SWD mode. */
 	STLinkDebugExit=0x21,
 	STLinkDebugReadCoreID=0x22,	/* Must be the first command. */
-	/* New interface commands? */ 
+	/* New interface commands? */
 	STLinkDebugUseAltAPI=0x30,
 	STLinkDebugAltAPIReadID=0x31,
 	STLinkDebugAltAPIResetTarget=0x32,
@@ -511,15 +536,14 @@ void stl_close(struct stlink *sl)
  * This is only used for commands to the STLink device itself, not for
  * commands to the target processor.
  */
-void st_gcmd(struct stlink *sl, uint8_t st_cmd0, uint8_t st_cmd1, int resp_len)
+int st_gcmd(struct stlink *sl, uint8_t st_cmd0, uint8_t st_cmd1, int resp_len)
 {
 	sl->cmd_buf[0] = st_cmd0;
 	sl->cmd_buf[1] = st_cmd1;
 	sl->cmd_len = 2;
 	sl->data_len = resp_len;
 	sl->xfer_dir = STLinkParamFromDev;
-	stl_do_cmd(sl);
-	return;
+	return stl_do_cmd(sl);
 }
 
 #define stl_get_version(sl) st_gcmd(sl, STLinkGetVersion, 0, 6)
@@ -687,8 +711,8 @@ int stl_do_cmd(struct stlink *stl)
 								   stl->data_buf, stl->data_len,
 								   &actual_xfer_len, USB_TIMEOUT_MSEC);
 		if (ret != 0 || actual_xfer_len != stl->data_len)
-			printf(" * Failed USB input, %d, Command %2.2x %2.2x "
-				   "transfer length %d vs expected %d.\n",
+			printf(" * Failed USB input, status %d, Command %2.2x %2.2x "
+				   "expected %d bytes, received %d.\n",
 				   ret, stl->cmd_buf[0], stl->cmd_buf[1],
 				   actual_xfer_len, stl->data_len);
 		if (stl->verbose > 3)
@@ -759,6 +783,7 @@ static void stl_print_version(struct STLinkVersion *ver)
 				"(%04x %04x expected)\n",
 				ver->ST_VendorID, ver->ST_ProductID,
 				USB_ST_VID, USB_STLINK_PID);
+	/* Expected versions  STLink: 3  JTAG: 2  SWIM: 0x20 */
 	fprintf(stderr, " Versions  STLink: 0x%x  JTAG: 0x%x  SWIM: 0x%x\n"
 			"    The firmware %s a JTAG/SWD interface.\n"
 			"    The firmware %s a SWIM interface.\n",
@@ -839,6 +864,17 @@ int stl_set_breakpoint(struct stlink *sl, int fp_nr, uint32_t addr, int fp)
 #define FLASH_CR_OPTER 0x0020
 #define FLASH_CR_STRT 0x0040
 #define FLASH_CR_LOCK 0x0080
+
+/* Names and definitions from PM0081 (STM32F4). */
+#define F4_FLASH_REGS 0x40023C00
+
+#define F4_FLASH_ACR	(F4_FLASH_REGS + 0x00)
+#define F4_FLASH_KEYR	(F4_FLASH_REGS + 0x04)
+#define F4_FLASH_OPTKEYR 	(F4_FLASH_REGS + 0x08)
+#define F4_FLASH_SR	(F4_FLASH_REGS + 0x0c)
+#define  F4_FLASH_SR_BSY 0x00010000
+#define F4_FLASH_CR	(F4_FLASH_REGS + 0x10)
+#define  F4_FLASH_CR_STRT 0x00010000
 
 /* Unlock the flash.  This takes two write cycles with two key values.
  * The two key values are sequentially written to the FLASH_KEYR register.
@@ -948,7 +984,7 @@ static const uint8_t loader_code[] = {
  * A count of the busy loop iterations in kept in R5 -- a rough estimation
  * of the write speed.
  */
- static const uint16_t db_loader_code[] = {
+static const uint16_t db_loader_code[] = {
 	 0x480B,			/* ldr	r0, .SRC_ADDR */
 	 0x490C,			/* ldr	r1, .TARGET_ADDR */
 	 0x4A0C,			/* ldr	r2, .COUNT  */
@@ -978,6 +1014,42 @@ static const uint8_t loader_code[] = {
 	 0x0006, 0x0000,	/* .COUNT: .word 0x00000100 */
  };
 
+/* The same code for the STM32F4 flash peripheral.
+ * The code is similar, but status bit positions and write size differences
+ * make it unwise to use the same code.
+ * The F4 can do 8/16/32 bit writes (even 64 bits, with 8 Volt Vpp)
+ * We use 32 bit writes for best speed.
+ */
+static const uint16_t f4_loader_code[] = {
+	 0x480B,			/* ldr	r0, .SRC_ADDR */
+	 0x490C,			/* ldr	r1, .TARGET_ADDR */
+	 0x4A0C,			/* ldr	r2, .COUNT  */
+	 0x4c09,			/* ldr	r4, .STM32_FLASH_BASE */
+	 0x2501,			/* movs	r5, #FLASH_CR_PG_BIT  0x0001, then busy_count */
+	 0x6125,			/* str	r5, [r4, #STM32_FLASH_CR_OFFSET] */
+	 /* copy_hword: */
+	 0xf830, 0x3b02,	/* ldrh	r3, [r0], #0x02 */
+	 0xf821, 0x3b02,	/* strh	r3, [r1], #0x02 */
+	 /* busy: */
+	 0x3501,			/* add	r5, r5, #0x01 ; Increment busy_count */
+	 0x68e3,			/* ldr	r3, [r4, #STM32_FLASH_SR_OFFSET] */
+	 0xf013, 0x0f01,	/* tst	r3, #0x01 ;  check FLASH_SR_BSY */
+	 0xd1fa,			/* bne	busy */
+	 0xf013, 0x0ff0,	/* tst	r3, #0xF0 ; check for PG*ERR errors */
+	 0xd102,			/* bne	exit */
+	 0x3a01,			/* subs	r2, r2, #0x01 ;  Decrement COUNT*/
+	 0xd1f1,			/* bne	copy_hword */
+	 /* Normal completion, clear #FLASH_CR_PG_BIT.  Note that r2 is now 0. */
+	 0x6122,			/* str	r2, [r4, #STM32_FLASH_CR_OFFSET] */
+	 /* exit: */
+	 0xbe00,			/* bkpt	#0x00 */
+	 /* The following parameters will be overwritten before download. */
+	 0x2000, 0x4002,	/* .STM32_FLASH_BASE: .word 0x40022000 */
+	 0x0040, 0x2000,	/* .SRC_ADDR: .word 0x20000040 */
+	 0x0bd0, 0x0800,	/* .TARGET_ADDR: .word 0x0800xxxx */
+	 0x0006, 0x0000,	/* .COUNT: .word 0x00000100 */
+ };
+
 /*
  * Write the flash at FLASH_ADDR with data BUF of SIZE bytes.
  * This routine downloads the flash-write program, parameters
@@ -993,16 +1065,27 @@ static int stl_loader(struct stlink *sl, stm32_addr_t flash_addr,
 	int offset = 0;
 	uint32_t prog_base = stm_devids[0].sram_base;
 	uint32_t *params;
+	uint32_t flash_ctrl_base;
 
-	memcpy(sl->data_buf, db_loader_code, sizeof(db_loader_code));
-	offset = sizeof(db_loader_code);
+	if (stm_devids[sl->chip_index].cap_flags & ChipCapF4Flash) {
+		offset = sizeof(f4_loader_code);
+		memcpy(sl->data_buf, f4_loader_code, offset);
+		flash_ctrl_base = F4_FLASH_REGS;
+	} else {
+		offset = sizeof(db_loader_code);
+		memcpy(sl->data_buf, db_loader_code, offset);
+		if (stm_devids[sl->chip_index].flash_size > 256*1024  &&
+			flash_addr >= 0x08080000)
+			flash_ctrl_base = 0x40022040;
+		else
+			flash_ctrl_base = FLASH_REGS_ADDR;
+	}
 	params = (uint32_t *)(sl->data_buf+offset);
 
 	/* Write params[-4] to change the FLASH_REGS_ADDR base.
 	 * Connectivity devices use an offset of +0x40 e.g. 0x40022040
 	 * for a second bank of flash. */
-	if (stm_devids[0].flash_size > 256*1024  &&  flash_addr >= 0x08080000)
-		params[-4] = 0x40022040;
+	params[-4] = flash_ctrl_base;
 	params[-3] = prog_base + offset;
 	params[-2] = flash_addr;
 	params[-1] = size>>1;
@@ -1046,6 +1129,7 @@ static int stl_flash_write(struct stlink *sl, stm32_addr_t flash_addr,
 		else
 			this_size = size;
 		stl_loader(sl, flash_addr + offset, buf + offset, this_size);
+		/* Writing 2KB takes 40-70 msec according to sec. 5.3.9 */
 		while (stl_get_status(sl) != STLINK_CORE_HALTED)
 			if (++failcount > FLASH_POLL_LIMIT) {
 				if (sl->verbose)
@@ -1078,9 +1162,13 @@ static int stl_flash_write(struct stlink *sl, stm32_addr_t flash_addr,
  * The flash controller should be idle at entry, and this waits for idle
  * before exit.
  */
+static int stl_f4_flash_erase_page(struct stlink *sl, stm32_addr_t addr_page);
 static int stl_flash_erase_page(struct stlink *sl, stm32_addr_t addr_page)
 {
 	int i = 0, status;
+
+	if (stm_devids[sl->chip_index].cap_flags & ChipCapF4Flash)
+		return stl_f4_flash_erase_page(sl, addr_page);
 
 	/* Unlock the flash register and clear any previous errors. */
 	sl_wr32(sl, FLASH_KEYR, FLASH_KEY1);
@@ -1116,6 +1204,48 @@ static int stl_flash_erase_page(struct stlink *sl, stm32_addr_t addr_page)
 				status, sl_rd32(sl, FLASH_SR), i);
 		return 1;
 	}
+	if (sl->verbose)
+		fprintf(stderr, "STLink erase flash page %8.8x: %d status checks to "
+				"complete %8.8x.\n", addr_page, i, status);
+	return 0;
+}
+
+static int stl_f4_flash_erase_page(struct stlink *sl, stm32_addr_t addr_page)
+{
+	int i = 0, status;
+
+	if (sl->verbose > 1)
+		fprintf(stderr, "STLink STM32F4 erase flash: Flash_SR %8.8x "
+				"Flash_CR %8.8x.\n",
+				sl_rd32(sl, F4_FLASH_SR), sl_rd32(sl, F4_FLASH_CR));
+
+
+	/* Unlock the flash register and clear any previous errors. */
+	sl_wr32(sl, F4_FLASH_KEYR, FLASH_KEY1);
+	sl_wr32(sl, F4_FLASH_KEYR, FLASH_KEY2);
+	sl_wr32(sl, F4_FLASH_SR, 0xF3); 		/* Clear error bits. */
+
+	if (sl->verbose > 1)
+		fprintf(stderr, "STLink STM32F4 erase flash: status %8.8x "
+				"Flash_CR %8.8x.\n",
+				sl_rd32(sl, F4_FLASH_SR), sl_rd32(sl, F4_FLASH_CR));
+
+	if (addr_page == 0xa11) {
+		/* Start the erase-all operation, PM0075 sec 3.5. */
+		sl_wr32(sl, F4_FLASH_CR, FLASH_CR_MER);
+		sl_wr32(sl, F4_FLASH_CR, F4_FLASH_CR_STRT | FLASH_CR_MER);
+	} else {
+		int sector = addr_page & 0x0f;
+		/* Select the sector to erase. */
+		sl_wr32(sl, F4_FLASH_CR, 0x00202 | (sector<<3));
+		sl_wr32(sl, F4_FLASH_CR, 0x10202 | (sector<<3));
+	}
+	/* Monitor the busy bit to check for completion.  This typically takes
+	 * only two iterations. */
+	do {
+		status = sl_rd32(sl, F4_FLASH_SR);
+		i++;
+	} while ((status & F4_FLASH_SR_BSY) && i < 1000);
 	if (sl->verbose)
 		fprintf(stderr, "STLink erase flash page %8.8x: %d status checks to "
 				"complete %8.8x.\n", addr_page, i, status);
@@ -1405,36 +1535,69 @@ int stl_kick_mode(struct stlink *sl)
 	return -1;
 }
 
-static void stm_info(struct stlink* sl)
+/* Set sl->chip_index based on target chip ID or other characteristics.
+ * Called after the STLink type has been determined. */
+static int stm_id_chip(struct stlink* sl)
 {
-	uint32_t idcode, devparam;
+	uint32_t core_id = stl_get_core_id(sl);
+	uint32_t idcode;
 	int i;
 
 	idcode = sl_rd32(sl, DBGMCU_IDCODE); 			/* At 0xE0042000 */
+	/* This should be conditional on core_id. */
 	if (idcode == 0)								/* Cortex-M0 */
 		idcode = sl_rd32(sl, 0x40015800);
 		
+	if (verbose)
+		printf("SWD core ID %8.8x, MCU ID is %8.8x.\n",
+			   core_id, idcode);
+	if (core_id != 0x1BA01477 && core_id != 0x2BA01477 && core_id != 0x0BB11477)
+		fprintf(stderr, "Warning: SWD core ID %8.8x did not match the "
+				"expected value of 0x-B--1477.\n", core_id);
+
 	for (i = 0; stm_devids[i].name; i++)
 		if (idcode == stm_devids[i].dbgmcu_idcode) {
 			sl->chip_index = i;
 			break;
 		}
+	return 0;
+}
+
+static void stm_info(struct stlink* sl)
+{
+	uint32_t idcode, cpu_id, devparam;
+
+	idcode = sl_rd32(sl, DBGMCU_IDCODE); 			/* At 0xE0042000 */
+	/* Should also read the CPU ID base register at 0xe000ed00
+	 * Cortex-M0 0x41--c20-
+	 * Cortex-M3 0x411fc231
+	 */
+	cpu_id = sl_rd32(sl, 0xe000ed00);
 
 	printf(" Target DBGMC_IDCODE %3.3x (Rev ID %4.4x) %s.\n",
 		   idcode & 0x0FFF, idcode, stm_devids[sl->chip_index].name);
+	printf(" CPU ID base %8.8x.\n", cpu_id);
 
 	/* Read the device parameters: flash size and serial number. */
 	/* The STM32F1 has the flash size at 0x1FFFf7e0. */
 	devparam = sl_rd32(sl, 0x1FFFf7e0);
-	sl->flash_mem_size = devparam & 0xff;
 	/* The STM32F2 and STM32F4 have the flash size at 0x1FFF7A22. */
-	sl->flash_mem_size = sl_rd32(sl, 0x1FFF7A22);
-
-	printf("Flash size %dK (register %4.4x).\n",
-		   devparam & 0xff, devparam);
-	printf("  Information block %8.8x %8.8x %8.8x %8.8x.\n",
-		   sl_rd32(sl, 0x1FFFf800), sl_rd32(sl, 0x1FFFf804),
-		   sl_rd32(sl, 0x1FFFf808), sl_rd32(sl, 0x1FFFf80c));
+	if (devparam == 0xffffffff) {
+		devparam = sl_rd32(sl, 0x1FFF7A20);
+		sl->flash_mem_size = devparam >> 16;
+		printf("Flash size %dK (register 0x1FFF7A20 %4.4x).\n",
+			   sl->flash_mem_size, devparam);
+		printf("  Information block %8.8x %8.8x %8.8x %8.8x.\n",
+			   sl_rd32(sl, 0x1FFFC000), sl_rd32(sl, 0x1FFFC004),
+			   sl_rd32(sl, 0x1FFFC008), sl_rd32(sl, 0x1FFFC00c));
+	} else {
+		sl->flash_mem_size = devparam & 0xffff;
+		printf("Flash size %dK (register %4.4x).\n",
+			   devparam & 0xff, devparam);
+		printf("  Information block %8.8x %8.8x %8.8x %8.8x.\n",
+			   sl_rd32(sl, 0x1FFFf800), sl_rd32(sl, 0x1FFFf804),
+			   sl_rd32(sl, 0x1FFFf808), sl_rd32(sl, 0x1FFFf80c));
+	}
 
 	return;
 }
@@ -1809,10 +1972,10 @@ int main(int argc, char *argv[])
 				sl->dev_path);
 		return EXIT_FAILURE;
 	}
-#if 1
+
 	if (sl->verbose)
 		stl_print_version(&sl->ver);
-#endif
+
 	if (sl->ver.ST_VendorID != USB_ST_VID  ||
 		(sl->ver.ST_ProductID != USB_STLINK_PID &&
 		 sl->ver.ST_ProductID != USB_STLINKv2_PID)) {
@@ -1844,16 +2007,17 @@ int main(int argc, char *argv[])
 	}
 
 	/* At this point we have identified a working STLink programmer.
-	 * We now check on the target chip ID and state.
-	 */
-	{
-		uint32_t core_id = stl_get_core_id(sl);
-		if (verbose)
-			printf("SWD core ID %8.8x, MCU ID is %8.8x.\n",
-				   core_id, sl_rd32(sl, DBGMCU_IDCODE));
-		if (core_id != 0x1BA01477 && core_id != 0x2BA01477)
-			fprintf(stderr, "Warning: SWD core ID %8.8x did not match the "
-					"expected value of %8.8x.\n", core_id, 0x1BA01477);
+	 * We now check on the target chip ID and state. */
+	stm_id_chip(sl);
+
+	/* Do any -C/-D/-U operations. */
+	if (upload_path) {
+		uint32_t flash_base = stm_devids[sl->chip_index].flash_base;
+		uint32_t flash_size = stm_devids[sl->chip_index].flash_size;
+		/* Read the program area. */
+		fprintf(stderr, " Reading ARM memory 0x%8.8x..0x%8.8x into %s.\n",
+				flash_base, flash_base+flash_size, upload_path);
+		stl_fread(sl, upload_path, flash_base, flash_size);
 	}
 
 	while (argv[optind]) {
@@ -1989,7 +2153,7 @@ int main(int argc, char *argv[])
 			printf("Result of Commmand12 is %2.2x.\n",
 				   stlink_cmd(sl, 0x0c, 0, 0));
 		}
-		/* Some ad hoc device register display commands. */
+		/* The table-driven peripheral device display commands. */
 		else if (stm32_dev_show(sl, cmd) == 0) {
 			;			/* dev_show() has already done the work.  */
 		}
