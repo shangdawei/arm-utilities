@@ -13,13 +13,13 @@ The goal of this project is to make boot-level and embedded ARM code development
 
 This project is focused on command-line and scripted tool chain use, rather than integration with a specific GUI environment or IDE.
 
-The code is written for Linux, and that is expected to be the primary host platform.  Modifications for other host platforms will be happily reviewed, but will likely be declined if they add significant complexity.
+The code is written for Linux, and that is expected to be the primary host platform.  Modifications for other host platforms will be happily reviewed, but will likely be declined if they add significant complexity.  Lightly tested Windows and Mac support is in the source code, but the Makefile support is known to be incomplete.
 
 A specific example of the design philosophy is the stlink-download utility.  The STLink is a USB device that presents itself as USB mass-storage (it poses as a flash drive).  The programmer/debugger interface is through vendor-specific SCSI commands.  There are multiple libraries to abstract USB and SCSI use e.g. SCSI-Generic and SCSI-Pass-Through.  None are ubiquitous, leading to extra complexity during build and installation.  Instead of using a library, we directly use the scsi-generic device.  While this resulted in higher initial development effort, the result is a more robust and more easily deployed program.
 
 = History =
 
-The base code was written by Donald Becker and William Carlson in December 2010 and January 2011.
+The base code was written by Donald Becker and William Carlson in December 2010 and January 2011.  MS-Windows support was added July 2011 by Anton Eltchaninov, and special contributions were later made by Hugo Becker.
 
 We had designed an EV motor controller and chose the Atmel AVR / Arduino as the initial microcontroller platform.  After just a few minutes exploring the fun but limiting Arduino programming environment, we decided to base development on that hardware but using a traditional C-Makefile-download process.
 
