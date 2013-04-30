@@ -11,7 +11,7 @@
   (GPL) v2 or v3.  Distribution under other terms requires an explicit
   license from the authors.
 
-  The v1 protocol is encapsulted in the standard USB mass storage device
+  The v1 protocol is encapsulated in the standard USB mass storage device
   protocol, which is a simple SCSI command protocol. The STLink operations
   are encapsulated in vendor-specific SCSI commands.
 
@@ -45,12 +45,12 @@
  This requires the SCSI Generic library.
  If missing, do 'sudo apt-get install libsgutils2-dev'
 
-Usage notes:
+Usage notes on the original STLink v1 firmware only:
  This is a deeply broken device.  They apparently built the mass storage
  interface by cribbing the USB device table from a 32MB flash stick.  But
  the device doesn't have 32MB, only hard-wired responses that presents
  three tiny 'files'.  Not arbitrary responses, only ones to the exact
- USB commands that Windows would use, and only accurately filling in the
+ USB commands that Windows XP issues, and only accurately filling in the
  fields that Windows uses.
 
  The result is that non-Windows machines choke on this device.  (It's likely
@@ -149,6 +149,22 @@ int verbose = 0;
  * you have to update.  But this tool is for microcontroller developers so
  * I have no qualms about being far more flexible.
  */
+
+/* This maps from the DBG interface ID to the chip ID.
+ * COREID is register 14 in SWD space. */
+struct core_id_cap_table {
+	const char *name;
+	int cap_flags;
+	uint32_t core_id;
+} arm_cores[] = {
+	{ "Cortex-M0", 0, 0x0bb11477},
+	{ "Cortex-M3 r1", 0, 0x1ba01477},
+	{ "Cortex-M3 r2p0", 0, 0x4ba00477},
+	{ "Cortex-M4 r0", 0, 0x2ba01477},
+	{ "Unknown core", 0, 0},
+};
+	
+
 #define DBGMCU_IDCODE 0xE0042000	/* The MCU device ID. */
 
 enum chip_capabilities {
@@ -217,6 +233,11 @@ struct stm_chip_params {			/* Unused/placeholder parameter table. */
 	  0x1ba01477, 0x10186416,	/* L152RBT6 as on 32L-Discovery. */
 	  0x08000000, 128*1024, 2048,
 	  0x1fffb000, 16*1024, 1024,
+	  0x20000000, 8*1024},
+	{ "STM32F303VCT6", 0,
+	  0x3ba00477, 0x10016422,	/* Type 422 F3 (Cortex M4) devices. */
+	  0x08000000, 256*1024, 2048,
+	  0x1fffb000, 18*1024, 1024,
 	  0x20000000, 8*1024},
 	{ "STM32F407", ChipCapF4Flash,
 	  0x2ba01477, 0x20006411,	/* F4 (Cortex M4) devices. */
@@ -344,6 +365,7 @@ enum STLink_JTAG_Cmds {
 	STLinkDebugAltAPIReadReg=0x33,
 	STLinkDebugAltAPIWriteReg=0x34,
 	STLinkDebugAltAPIReadAllRegs=0x3A,
+	STLinkJTAGSetNRST=0x3c,
 	/* The regular commands. */
 	STLinkDebugGetStatus=0x01,
 	STLinkDebugForceDebug=0x02,
@@ -405,6 +427,7 @@ struct stlink {
 	int verbose;				/* A local copy of 'verbose'. */
 
 	int chip_index;				/* Index into stm_devids[], if known. */
+	uint32_t cpu_idcode;		/* DBGMC_IDCODE */
 	int flash_mem_size;			/* Reported flash memory size in KB. */
 	stm32_addr_t flash_base;
 
@@ -710,11 +733,12 @@ int stl_do_cmd(struct stlink *stl)
 		ret = libusb_bulk_transfer(stl->usb_hand, USB_PIPE_IN,
 								   stl->data_buf, stl->data_len,
 								   &actual_xfer_len, USB_TIMEOUT_MSEC);
-		if (ret != 0 || actual_xfer_len != stl->data_len)
+		if (ret != 0 || actual_xfer_len != stl->data_len) {
 			printf(" * Failed USB input, status %d, Command %2.2x %2.2x "
 				   "expected %d bytes, received %d.\n",
 				   ret, stl->cmd_buf[0], stl->cmd_buf[1],
-				   actual_xfer_len, stl->data_len);
+				   stl->data_len, actual_xfer_len);
+		}
 		if (stl->verbose > 3)
 			printf("Transfer done, status %d read length %d of %d.\n",
 				   ret, actual_xfer_len, stl->data_len);
@@ -776,7 +800,7 @@ static void stl_print_version(struct STLinkVersion *ver)
 	if (ver->ST_VendorID == USB_ST_VID &&
 		(ver->ST_ProductID == USB_STLINK_PID ||
 		 ver->ST_ProductID == USB_STLINKv2_PID))
-		fprintf(stderr, "Standard Vendor/Product ID 0x%04x 0x%04x\n",
+		fprintf(stderr, "STMicro Vendor/Product ID 0x%04x 0x%04x\n",
 				ver->ST_VendorID, ver->ST_ProductID);
 	else
 		fprintf(stderr, "Incorrect Vendor/Product ID 0x%04x 0x%04x "
@@ -1486,6 +1510,7 @@ int stl_kick_mode(struct stlink *sl)
 		stlink_mode == STLinkDevMode_Mass)
 		return 0;
 
+#if 0
 	if (sl->verbose) {
 		sl->core_state = stl_get_status(sl);
 		fprintf(stderr, " STLink mode is %4.4x.\n"
@@ -1494,7 +1519,7 @@ int stl_kick_mode(struct stlink *sl)
 				sl->core_state==STLINK_CORE_RUNNING ? "running" :
 				(sl->core_state==STLINK_CORE_HALTED ? "halted" : "unknown"));
 	}
-
+#endif
 
 	/* Otherwise assume that we are in DFU mode and attempt to exit back
 	 * to mass storage mode.  This is super painful and slow. */
@@ -1543,31 +1568,41 @@ static int stm_id_chip(struct stlink* sl)
 	uint32_t idcode;
 	int i;
 
+	/* This should be conditional on core_id.
+	 * If core_id == 0x0BB11477, then we have a Cortex-M0 and should read
+	 * the idcode from 0x40015800 instead of 0xE0042000. */
 	idcode = sl_rd32(sl, DBGMCU_IDCODE); 			/* At 0xE0042000 */
-	/* This should be conditional on core_id. */
 	if (idcode == 0)								/* Cortex-M0 */
 		idcode = sl_rd32(sl, 0x40015800);
-		
+	sl->cpu_idcode = idcode;
+
 	if (verbose)
 		printf("SWD core ID %8.8x, MCU ID is %8.8x.\n",
 			   core_id, idcode);
-	if (core_id != 0x1BA01477 && core_id != 0x2BA01477 && core_id != 0x0BB11477)
+	for (i = 0; arm_cores[i].core_id; i++)
+		if (arm_cores[i].core_id == core_id)
+			break;
+	if (arm_cores[i].core_id == 0)
 		fprintf(stderr, "Warning: SWD core ID %8.8x did not match the "
 				"expected value of 0x-B--1477.\n", core_id);
+	if (verbose)
+		printf("  %s\n", arm_cores[i].name);
 
 	for (i = 0; stm_devids[i].name; i++)
 		if (idcode == stm_devids[i].dbgmcu_idcode) {
 			sl->chip_index = i;
 			break;
 		}
+
 	return 0;
 }
 
 static void stm_info(struct stlink* sl)
 {
-	uint32_t idcode, cpu_id, devparam;
+	uint32_t cpu_id, devparam;
 
-	idcode = sl_rd32(sl, DBGMCU_IDCODE); 			/* At 0xE0042000 */
+	printf("Target STM32 MCU information:\n");
+
 	/* Should also read the CPU ID base register at 0xe000ed00
 	 * Cortex-M0 0x41--c20-
 	 * Cortex-M3 0x411fc231
@@ -1575,28 +1610,35 @@ static void stm_info(struct stlink* sl)
 	cpu_id = sl_rd32(sl, 0xe000ed00);
 
 	printf(" Target DBGMC_IDCODE %3.3x (Rev ID %4.4x) %s.\n",
-		   idcode & 0x0FFF, idcode, stm_devids[sl->chip_index].name);
+		   sl->cpu_idcode & 0x0FFF, sl->cpu_idcode,
+		   stm_devids[sl->chip_index].name);
 	printf(" CPU ID base %8.8x.\n", cpu_id);
 
 	/* Read the device parameters: flash size and serial number. */
 	/* The STM32F1 has the flash size at 0x1FFFf7e0. */
 	devparam = sl_rd32(sl, 0x1FFFf7e0);
 	/* The STM32F2 and STM32F4 have the flash size at 0x1FFF7A22. */
-	if (devparam == 0xffffffff) {
-		devparam = sl_rd32(sl, 0x1FFF7A20);
-		sl->flash_mem_size = devparam >> 16;
-		printf("Flash size %dK (register 0x1FFF7A20 %4.4x).\n",
-			   sl->flash_mem_size, devparam);
-		printf("  Information block %8.8x %8.8x %8.8x %8.8x.\n",
-			   sl_rd32(sl, 0x1FFFC000), sl_rd32(sl, 0x1FFFC004),
-			   sl_rd32(sl, 0x1FFFC008), sl_rd32(sl, 0x1FFFC00c));
-	} else {
+	if (devparam != 0xffffffff) {
 		sl->flash_mem_size = devparam & 0xffff;
-		printf("Flash size %dK (register %4.4x).\n",
+		printf(" Flash size %dK (register %4.4x).\n",
 			   devparam & 0xff, devparam);
 		printf("  Information block %8.8x %8.8x %8.8x %8.8x.\n",
 			   sl_rd32(sl, 0x1FFFf800), sl_rd32(sl, 0x1FFFf804),
 			   sl_rd32(sl, 0x1FFFf808), sl_rd32(sl, 0x1FFFf80c));
+	} else if (0xffffffff != (devparam = sl_rd32(sl, 0x1FFF7A20))) {
+		sl->flash_mem_size = devparam >> 16;
+		printf(" Flash size %dK (register 0x1FFF7A20 %4.4x).\n",
+			   sl->flash_mem_size, devparam);
+		printf("  Information block %8.8x %8.8x %8.8x %8.8x.\n",
+			   sl_rd32(sl, 0x1FFFC000), sl_rd32(sl, 0x1FFFC004),
+			   sl_rd32(sl, 0x1FFFC008), sl_rd32(sl, 0x1FFFC00c));
+	} else if (0xffffffff != (devparam = sl_rd32(sl, 0x1FFFF7CC))) {
+		sl->flash_mem_size = devparam & 0xFFFF;
+		printf(" Flash size %dK (register 0x1FFFF7CC %4.4x).\n",
+			   sl->flash_mem_size, devparam);
+		printf("  Information block %8.8x %8.8x %8.8x %8.8x.\n",
+			   sl_rd32(sl, 0x1FFFF800), sl_rd32(sl, 0x1FFFF804),
+			   sl_rd32(sl, 0x1FFFF808), sl_rd32(sl, 0x1FFFF80c));
 	}
 
 	return;
@@ -1853,6 +1895,13 @@ struct dev_peripheral dev_per[] = {
 	{"WWDG", 0x40002C00, 0, stm_show_WWDG, 0},
 	{"IWDG", 0x40003000, 0, stm_show_IWDG, 0},
 #endif
+	/* I/O ports on newer devices. */
+	{"GPIOA", 0x48000000, 0, stm_show_dev, 44},
+	{"GPIOB", 0x48000400, 0, stm_show_dev, 44},
+	{"GPIOC", 0x48000800, 0, stm_show_dev, 44},
+	{"GPIOD", 0x48000C00, 0, stm_show_dev, 44},
+	{"GPIOE", 0x48001000, 0, stm_show_dev, 44},
+	{"GPIOF", 0x48001400, 0, stm_show_dev, 44},
 };
 
 static int stm32_dev_show(struct stlink* sl, const char *cmd_name)
@@ -1899,11 +1948,16 @@ struct stlink *stl_usb_scan(struct stlink *sl, const char *dev_name)
 	if (dev_handle == NULL) {
 		if (verbose)
 			printf("No USB STLink found.\n");
+		libusb_free_device_list(devs, 0);
 		return NULL;
 	}
 
-	if (verbose)
-		printf("Found a STLink v2 on the USB bus, %p.\n", dev_handle);
+	if (verbose) {
+		libusb_device *this_dev = libusb_get_device(dev_handle);
+		printf("Found a STLink v2 on USB bus %d device %d.\n",
+			   libusb_get_bus_number(this_dev),
+			   libusb_get_device_address(this_dev));
+	}
 
 	/* We know that configuration 1 is the only one. */
 	r = libusb_reset_device(dev_handle);
