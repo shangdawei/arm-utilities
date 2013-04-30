@@ -1,0 +1,68 @@
+This directory contains command line utility programs to use the
+STLink and STLink v2 programming/debug interface for STMicro microcontrollers.
+
+The STLink is found on STM8 and STM32 Discovery development boards, as
+well as stand-alone programming pods.  The development boards include
+both a full featured programming host and a target system, at a far
+lower price than the programming host alone.
+
+Specific boards tested are
+  STM32 VL Discovery   Original with flawed STLink v1 firmware (see below)
+  STM32 F0 Discovery	With a prototyping board
+  STM32 F3 Discovery
+  STM32 F4 Discovery	Wonderful set of sensors and audio
+  STM32 L  Discovery	STM32L151 With 6 character LCD segment display
+
+
+Brief command summary
+
+info
+  Report information about the target MCU
+version
+  Report information about the utility program
+
+program=<filename.bin>
+  Write the file into flash memory starting at the execution.
+  The file should be the final binary program, not an ELF or object file.
+
+
+Register read/set command
+  These are only usable when the processor core is halted.
+
+regs
+  Show all registers
+reg0 ... reg20
+wreg0=<val> ... wreg20=<val>
+  Read or write an individual register.
+  Registers 16..20 refer to the XPSR, MAIN_SP, Process_SP, RW and RW2
+
+Processor operating state
+
+status
+  Return the run status of the ARM core, running or halted.
+debug
+  Stop the ARM core (set to halted state), allowing processor registers
+  to be read and set.
+reset
+  Stop ARM core and initialize the processor registers
+run
+  Set the ARM core to run.
+step
+  If the ARM core is halted, execute a single instruction and return
+  to halted state.
+  
+
+Notes on the original VL Discovery board
+
+The original VL-Discovery board ships with flawed firmware in the STLink
+section.  This "version 1" interface is easy to identify: it emulates a
+32MB flash drive, but with protocol bugs that can crash the OS.  Unless
+you need it to test backwards compatibilty (as we do), reflash with v2
+firmware.
+
+Other STLink Devices
+
+We have not tested with any of the stand-alone STLink programming
+"pods". The pods are much less cost effective.  The only feature they
+support is the ability to work with a different voltage target system,
+which is rarely an issue.
