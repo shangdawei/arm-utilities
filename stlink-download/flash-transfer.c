@@ -48,6 +48,27 @@ stm_flash_bulk_write(short *src, short *dest_in, volatile int count)
 	/* Halt. */
 	return *src++;
 }
+
+#define F4_FLASH_REGS 0x40023C00
+
+int __attribute__((naked))
+stm_f4_flash_bulk_write(short *src, short *dest_in, volatile int count)
+{
+	int volatile  *flash_regs = (void*)F4_FLASH_REGS;
+	int flash_sr;
+
+	flash_regs[4] = 1;
+	dest = dest_in;
+	do {
+		*dest++ = *src++;
+		while ((flash_sr = flash_regs[3]) & 0x1000)
+			;
+		if (flash_sr & 0x14)
+			break;
+	} while (count-=2);
+	/* Halt. */
+	return *src++;
+}
 
 /*
  * Local variables:
