@@ -168,7 +168,7 @@ struct core_id_cap_table {
 #define DBGMCU_IDCODE 0xE0042000	/* The MCU device ID. */
 
 enum chip_capabilities {
-	ChipCapF4Flash=1,
+	ChipCapF4Flash=1, ChipCapL15Flash=2, ChipCapL1Addrs=4,
 };
 struct stm_chip_params {			/* Unused/placeholder parameter table. */
 	const char *name;
@@ -199,6 +199,11 @@ struct stm_chip_params {			/* Unused/placeholder parameter table. */
 	  0x08000000, 32*1024, 1024,
 	  0x1ffff000, 2*1024, 1024,
 	  0x20000000, 4*1024},
+	{ "STM32F103C8T6", 0,	/* Medium-density 103Cxxx, 64KB/128K flash. */
+	  0x1ba01477, 0x20036410,
+	  0x08000000, 64*1024, 1024,
+	  0x1ffff000, 2*1024, 1024,
+	  0x20000000, 20*1024},
 	{ "STM32F105RB", 0,
 	  0x3ba00477, 0x10016430,	/* XL-density device. */
 	  0x08000000, 32*1024, 1024,
@@ -229,7 +234,7 @@ struct stm_chip_params {			/* Unused/placeholder parameter table. */
 	  0x08000000, 256*1024, 2048,
 	  0x1fffb000, 18*1024, 1024,
 	  0x20000000, 8*1024},
-	{ "STM32L152", 0,
+	{ "STM32L152", ChipCapL15Flash | ChipCapL1Addrs,
 	  0x1ba01477, 0x10186416,	/* L152RBT6 as on 32L-Discovery. */
 	  0x08000000, 128*1024, 2048,
 	  0x1fffb000, 16*1024, 1024,
@@ -427,7 +432,7 @@ struct stlink {
 	int verbose;				/* A local copy of 'verbose'. */
 
 	int chip_index;				/* Index into stm_devids[], if known. */
-	uint32_t cpu_idcode;		/* DBGMC_IDCODE */
+	uint32_t cpu_idcode;		/* DBGMCU_IDCODE */
 	int flash_mem_size;			/* Reported flash memory size in KB. */
 	stm32_addr_t flash_base;
 
@@ -800,10 +805,10 @@ static void stl_print_version(struct STLinkVersion *ver)
 	if (ver->ST_VendorID == USB_ST_VID &&
 		(ver->ST_ProductID == USB_STLINK_PID ||
 		 ver->ST_ProductID == USB_STLINKv2_PID))
-		fprintf(stderr, "STMicro Vendor/Product ID 0x%04x 0x%04x\n",
+		fprintf(stderr, "STLink Vendor/Product ID 0x%04x 0x%04x (STMicro)\n",
 				ver->ST_VendorID, ver->ST_ProductID);
 	else
-		fprintf(stderr, "Incorrect Vendor/Product ID 0x%04x 0x%04x "
+		fprintf(stderr, "STLink Vendor/Product ID 0x%04x 0x%04x (NOT STMicro!)"
 				"(%04x %04x expected)\n",
 				ver->ST_VendorID, ver->ST_ProductID,
 				USB_ST_VID, USB_STLINK_PID);
@@ -863,17 +868,25 @@ int stl_set_breakpoint(struct stlink *sl, int fp_nr, uint32_t addr, int fp)
 #define FLASH_KEY2 0xcdef89ab
 
 /* 32L15x flash controller. */
-#define L15_FLASH_REGS 0x40023C00
-#define L15_FLASH_ACR		(FLASH_REGS_ADDR + 0x00)
-#define L15_FLASH_PECR		(FLASH_REGS_ADDR + 0x04)
-#define L15_FLASH_PDKEYR	(FLASH_REGS_ADDR + 0x08)
-#define L15_FLASH_PEKEYR	(FLASH_REGS_ADDR + 0x0C)
+#define L15_FLASH_BASE 0x40023C00
+#define L15_FLASH_ACR		(L15_FLASH_BASE + 0x00)
+#define L15_FLASH_PECR		(L15_FLASH_BASE + 0x04)
+#define L15_FLASH_PDKEYR	(L15_FLASH_BASE + 0x08)
+#define L15_FLASH_PEKEYR	(L15_FLASH_BASE + 0x0C)
+#define L15_FLASH_PRGKEYR	(L15_FLASH_BASE + 0x10)
+#define L15_FLASH_OPTKEYR	(L15_FLASH_BASE + 0x14)
+#define L15_FLASH_SR		(L15_FLASH_BASE + 0x18)
+#define L15_FLASH_OBR		(L15_FLASH_BASE + 0x1C)
+#define L15_FLASH_WRPR1		(L15_FLASH_BASE + 0x20)
+#define L15_FLASH_WRPR2		(L15_FLASH_BASE + 0x80)
+#define L15_FLASH_WRPR3		(L15_FLASH_BASE + 0x84)
 
-#define L15_FLASH_WRPR	(FLASH_REGS_ADDR + 0x20)
-
-#define FLASH_PEKEY1 0x89abcdef
-#define FLASH_PEKEY2 0x02030405
-
+#define L15_FLASH_PEKEY1 0x89abcdef
+#define L15_FLASH_PEKEY2 0x02030405
+#define L15_FLASH_PRGKEY1 0x8C9DAEBF
+#define L15_FLASH_PRGKEY2 0x13141516
+#define L15_FLASH_OPTKEY1 0xFBEAD9C8
+#define L15_FLASH_OPTKEY2 0x24252627
 
 #define FLASH_SR_BSY 0x0001
 #define FLASH_SR_PGERR 0x0004
@@ -1186,13 +1199,24 @@ static int stl_flash_write(struct stlink *sl, stm32_addr_t flash_addr,
  * The flash controller should be idle at entry, and this waits for idle
  * before exit.
  */
-static int stl_f4_flash_erase_page(struct stlink *sl, stm32_addr_t addr_page);
+
+static int stl_f1_flash_erase(struct stlink *sl, stm32_addr_t addr_page);
+static int stl_f4_flash_erase(struct stlink *sl, stm32_addr_t addr_page);
+static int stl_L1_flash_erase(struct stlink *sl, stm32_addr_t addr_page);
+
 static int stl_flash_erase_page(struct stlink *sl, stm32_addr_t addr_page)
 {
-	int i = 0, status;
-
 	if (stm_devids[sl->chip_index].cap_flags & ChipCapF4Flash)
-		return stl_f4_flash_erase_page(sl, addr_page);
+		return stl_f4_flash_erase(sl, addr_page);
+	else if (stm_devids[sl->chip_index].cap_flags & ChipCapL15Flash)
+		return stl_L1_flash_erase(sl, addr_page);
+	else
+		return stl_f1_flash_erase(sl, addr_page);
+}
+
+static int stl_f1_flash_erase(struct stlink *sl, stm32_addr_t addr_page)
+{
+	int i = 0, status;
 
 	/* Unlock the flash register and clear any previous errors. */
 	sl_wr32(sl, FLASH_KEYR, FLASH_KEY1);
@@ -1234,7 +1258,7 @@ static int stl_flash_erase_page(struct stlink *sl, stm32_addr_t addr_page)
 	return 0;
 }
 
-static int stl_f4_flash_erase_page(struct stlink *sl, stm32_addr_t addr_page)
+static int stl_f4_flash_erase(struct stlink *sl, stm32_addr_t addr_page)
 {
 	int i = 0, status;
 
@@ -1272,6 +1296,51 @@ static int stl_f4_flash_erase_page(struct stlink *sl, stm32_addr_t addr_page)
 	} while ((status & F4_FLASH_SR_BSY) && i < 1000);
 	if (sl->verbose)
 		fprintf(stderr, "STLink erase flash page %8.8x: %d status checks to "
+				"complete %8.8x.\n", addr_page, i, status);
+	return 0;
+}
+
+static int stl_L1_flash_erase(struct stlink *sl, stm32_addr_t addr_page)
+{
+	int i = 0, status;
+
+	if (sl->verbose > 1)
+		fprintf(stderr, "STLink STM32L erase flash: Flash_ACR %8.8x "
+				"Flash_PECR %8.8x.\n",
+				sl_rd32(sl, L15_FLASH_ACR), sl_rd32(sl, L15_FLASH_ACR));
+
+	/* Unlock the flash register and clear any previous errors. */
+	sl_wr32(sl, L15_FLASH_PEKEYR, L15_FLASH_PEKEY1);
+	sl_wr32(sl, L15_FLASH_PEKEYR, L15_FLASH_PEKEY2);
+	/* Clear the program-lock bit with another magic write sequence. */
+	sl_wr32(sl, L15_FLASH_PRGKEYR, L15_FLASH_PRGKEY1);
+	sl_wr32(sl, L15_FLASH_PRGKEYR, L15_FLASH_PRGKEY2);
+
+	if (sl->verbose > 1)
+		fprintf(stderr, "STLink STM32L erase flash: status %8.8x "
+				"Flash_CR %8.8x, OBR %8.8x.\n",
+				sl_rd32(sl, L15_FLASH_PECR), sl_rd32(sl, L15_FLASH_ACR),
+				sl_rd32(sl, L15_FLASH_OBR));
+
+	if (addr_page == 0xa11) {
+		/* Do a mass erase / erase-all turning on read protection and then
+		 * turning it off. */
+		sl_wr32(sl, L15_FLASH_OBR, 0x01);
+		sl_wr32(sl, L15_FLASH_OBR, 0xAA);
+	} else {
+		int sector = addr_page & 0x0f;
+		/* Select the sector to erase. */
+		sl_wr32(sl, F4_FLASH_CR, 0x00202 | (sector<<3));
+		sl_wr32(sl, F4_FLASH_CR, 0x10202 | (sector<<3));
+	}
+	/* Monitor the busy bit to check for completion.  This typically takes
+	 * only two iterations. */
+	do {
+		status = sl_rd32(sl, L15_FLASH_SR);
+		i++;
+	} while ((status & FLASH_SR_BSY) && i < 1000);
+	if (sl->verbose)
+		fprintf(stderr, "STLink STM32L erase flash page %8.8x: %d status checks to "
 				"complete %8.8x.\n", addr_page, i, status);
 	return 0;
 }
@@ -1599,7 +1668,7 @@ static int stm_id_chip(struct stlink* sl)
 
 static void stm_info(struct stlink* sl)
 {
-	uint32_t cpu_id, devparam;
+	uint32_t cpu_id, chip_dev_id, devparam;
 
 	printf("Target STM32 MCU information:\n");
 
@@ -1607,25 +1676,36 @@ static void stm_info(struct stlink* sl)
 	 * Cortex-M0 0x41--c20-
 	 * Cortex-M3 0x411fc231
 	 */
-	cpu_id = sl_rd32(sl, 0xe000ed00);
-
+	chip_dev_id = sl->cpu_idcode & 0x0FFF;
 	printf(" Target DBGMC_IDCODE %3.3x (Rev ID %4.4x) %s.\n",
-		   sl->cpu_idcode & 0x0FFF, sl->cpu_idcode,
+		   chip_dev_id, sl->cpu_idcode,
 		   stm_devids[sl->chip_index].name);
+	cpu_id = sl_rd32(sl, 0xe000ed00);
 	printf(" CPU ID base %8.8x.\n", cpu_id);
 
 	/* Read the device parameters: flash size and serial number. */
-	/* The STM32F1 has the flash size at 0x1FFFf7e0. */
-	devparam = sl_rd32(sl, 0x1FFFf7e0);
-	/* The STM32F2 and STM32F4 have the flash size at 0x1FFF7A22. */
-	if (devparam != 0xffffffff) {
+	/* STMicro changes how to do this, seemingly for every chip. */
+	/* First we explicitly recognize a few chips. */
+	if (chip_dev_id == 0x416 || chip_dev_id == 0x427) {
+		devparam = sl_rd32(sl, 0x1FF8004C);
 		sl->flash_mem_size = devparam & 0xffff;
 		printf(" Flash size %dK (register %4.4x).\n",
-			   devparam & 0xff, devparam);
+			   sl->flash_mem_size, devparam);
+	} else if (chip_dev_id == 0x436) {
+		devparam = sl_rd32(sl, 0x1FF8004C);
+		sl->flash_mem_size = (devparam & 1) ? 256 : 384; 	/* WTF? */
+		printf(" Flash size %dK (register %4.4x).\n",
+			   sl->flash_mem_size, devparam);
+	} else if (0xffffffff != (devparam = sl_rd32(sl, 0x1FFFf7e0))) {
+	/* The STM32F1 has the flash size at 0x1FFFf7e0. */
+		sl->flash_mem_size = devparam & 0xffff;
+		printf(" Flash size %dK (register %4.4x).\n",
+			   sl->flash_mem_size, devparam);
 		printf("  Information block %8.8x %8.8x %8.8x %8.8x.\n",
 			   sl_rd32(sl, 0x1FFFf800), sl_rd32(sl, 0x1FFFf804),
 			   sl_rd32(sl, 0x1FFFf808), sl_rd32(sl, 0x1FFFf80c));
 	} else if (0xffffffff != (devparam = sl_rd32(sl, 0x1FFF7A20))) {
+		/* The STM32F2 and STM32F4 have the flash size at 0x1FFF7A22. */
 		sl->flash_mem_size = devparam >> 16;
 		printf(" Flash size %dK (register 0x1FFF7A20 %4.4x).\n",
 			   sl->flash_mem_size, devparam);
@@ -1820,9 +1900,11 @@ static void stm_show_SPI(struct stlink* sl, struct dev_peripheral *dp,
 static void stm_show_USART(struct stlink* sl, struct dev_peripheral *dp,
 							 uint32_t data[])
 {
-	printf("%s at %8.8x: %4.4x %4.4x %4.4x %4.4x %4.4x %4.4x %4.4x %4.4x\n",
+	printf("%s at %8.8x: %4.4x %4.4x %4.4x %4.4x %4.4x %4.4x %4.4x %4.4x\n"
+		   "  Divisor %d residue %d\n",
 		   dp->name, dp->addr, data[0], data[1], data[2], data[3],
-		   data[4], data[5], data[6], data[7]);
+		   data[4], data[5], data[6], data[7],
+		   data[3]>>4, data[3] & 0xF);
 }
 
 static void arm_show_systick(struct stlink* sl, struct dev_peripheral *dp,
@@ -1832,6 +1914,32 @@ static void arm_show_systick(struct stlink* sl, struct dev_peripheral *dp,
 		   "  calibration %d (%#x)\n",
 		   dp->addr, data_blk[0], data_blk[1], data_blk[2],
 		   data_blk[3] & 0x00ffffff, data_blk[3]);
+}
+
+static char *lcd_duty_cycle[8] = {
+	"No COM", "2 COM", "3 COM", "4 COM", "8 COM",
+	"invalid", "invalid", "invalid"};
+static void stm_show_LCD(struct stlink* sl, struct dev_peripheral *dp,
+							 uint32_t data_blk[])
+{
+	printf("LCD controller at %8.8x: Ctrl 0x%2.2x Frame 0x%8.8x, Status %2.2x\n"
+		   "  %s %s mode 1/%d-bias, %s pins, %s voltage\n",
+		   dp->addr, data_blk[0], data_blk[1], data_blk[2],
+		   data_blk[0] &0x01 ? "Enabled" : "Disabled",
+		   data_blk[0] &0x80 ? "32 seg" : "44 seg",
+		   data_blk[0] &0x40 ? 3 : data_blk[0] &0x20 ? 2 : 4,
+		   lcd_duty_cycle[(data_blk[0] &0x1F)>>2],
+		   data_blk[0] &0x02 ? "V_lcd pin" : "internal" );
+	printf(" Display: %4.4x%8.8x %4.4x%8.8x %4.4x%8.8x %4.4x%8.8x\n"
+		   "          %4.4x%8.8x %4.4x%8.8x %4.4x%8.8x %4.4x%8.8x\n",
+		   data_blk[6] & 0xffff, data_blk[5],
+		   data_blk[8] & 0xffff, data_blk[7],
+		   data_blk[10] & 0xffff, data_blk[9],
+		   data_blk[12] & 0xffff, data_blk[11],
+		   data_blk[14] & 0xffff, data_blk[13],
+		   data_blk[16] & 0xffff, data_blk[15],
+		   data_blk[18] & 0xffff, data_blk[17],
+		   data_blk[20] & 0xffff, data_blk[19]);
 }
 
 static void stm_show_dev(struct stlink* sl, struct dev_peripheral *dp,
@@ -1895,7 +2003,7 @@ struct dev_peripheral dev_per[] = {
 	{"WWDG", 0x40002C00, 0, stm_show_WWDG, 0},
 	{"IWDG", 0x40003000, 0, stm_show_IWDG, 0},
 #endif
-	/* I/O ports on newer devices. */
+	/* I/O pin configuration on new F3; use 'GPIO' instead of PORT. */
 	{"GPIOA", 0x48000000, 0, stm_show_dev, 44},
 	{"GPIOB", 0x48000400, 0, stm_show_dev, 44},
 	{"GPIOC", 0x48000800, 0, stm_show_dev, 44},
@@ -1904,9 +2012,58 @@ struct dev_peripheral dev_per[] = {
 	{"GPIOF", 0x48001400, 0, stm_show_dev, 44},
 };
 
+/* Previously I had hoped to use a single table, but
+ * chips increasing shuffle perhiperals.
+ * Put the L1 series on its own table.
+ */
+struct dev_peripheral dev_per_L1[] = {
+	{"SysTick", 0xE000E010, 0, arm_show_systick, 16},
+	{"LCD", 	0x40002400, 0, stm_show_LCD, 84},
+	{"PWR", 	0x40007000, 0, stm_show_dev, 32},
+	{"RI",		0x40007C00, 0, stm_show_dev, 32},
+	{"OPAMP",	0x40007C5C, 0, stm_show_dev, 32},
+	/* APB2 */
+	{"SYSCFG",	0x40010000, 0, stm_show_dev, 32},
+	{"EXTI",	0x40010400, 0, stm_show_dev, 32},
+	{"TIM9",	0x40010800, 9, stm_show_timer, 76},
+	{"TIM10",	0x40010C00, 10, stm_show_timer, 76},
+	{"TIM11",	0x40011000, 11, stm_show_timer, 76},
+	{"ADC",		0x40012400, 1, stm_show_dev, 32},
+	{"SDIO",	0x40012C00, 1, stm_show_dev, 32},
+	/* AHB perhiperals, all with new locations */
+	{"CRC",		0x40023000, 0, stm_show_dev, 32},
+	{"RCC",		0x40023800, 0, stm_show_dev, 56},
+	{"FLASH",	0x40023C00, 0, stm_show_dev, 32},
+	{"DMA1",	0x40026000, 1, stm_show_DMA, 8 + 20*7},
+	{"DMA2",	0x40026400, 2, stm_show_DMA, 8 + 20*7},
+	{"AES",		0x50060000, 0, stm_show_dev, 32},
+	/* I/O pin configuration on new F3; use 'GPIO' instead of PORT. */
+	{"GPIOA", 0x40020000, 0, stm_show_dev, 44},
+	{"GPIOB", 0x40020400, 0, stm_show_dev, 44},
+	{"GPIOC", 0x40020800, 0, stm_show_dev, 44},
+	{"GPIOD", 0x40020C00, 0, stm_show_dev, 44},
+	{"GPIOE", 0x40021000, 0, stm_show_dev, 44},
+	{"GPIOF", 0x40021800, 0, stm_show_dev, 44}, /* Not in address order */
+	{"GPIOG", 0x40021C00, 0, stm_show_dev, 44},
+	{"GPIOH", 0x40021400, 0, stm_show_dev, 44},
+};
+
 static int stm32_dev_show(struct stlink* sl, const char *cmd_name)
 {
 	int i;
+
+	if (stm_devids[sl->chip_index].cap_flags & ChipCapL1Addrs) {
+		for (i = 0; i < sizeof(dev_per_L1)/sizeof(dev_per_L1[0]); i++) {
+			struct dev_peripheral *dp = &dev_per_L1[i];
+			if (strcasecmp(dp->name, cmd_name) == 0) {
+				uint32_t *result = (void*)sl->data_buf;
+				if (dp->extent)
+					stl_rd32_cmd(sl, dp->addr, dp->extent);
+				dp->show_func1(sl, dp, result);
+				return 0;
+			}
+		}
+	}
 	for (i = 0; i < sizeof(dev_per)/sizeof(dev_per[0]); i++) {
 		struct dev_peripheral *dp = &dev_per[i];
 		if (strcasecmp(dp->name, cmd_name) == 0) {
@@ -2100,7 +2257,7 @@ int main(int argc, char *argv[])
 			uint32_t flash_size = stm_devids[0].flash_size;
 			int res;
 			/* Write the user flash area. */
-			fprintf(stderr, " Writing program from %s into STM32 memory at "
+			fprintf(stderr, " Writing program from %s into STM32 flash at "
 					"0x%8.8x.\n", path, flash_base);
 			stl_enter_debug(sl);
 			stl_reset(sl);
