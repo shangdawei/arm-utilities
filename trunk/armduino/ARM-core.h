@@ -33,6 +33,38 @@ typedef signed char int8_t;
 #define _MMIO_WORD(mem_addr) (*(volatile uint16_t *)(mem_addr))
 #define _MMIO_DWORD(mem_addr) (*(volatile uint32_t *)(mem_addr))
 
+/* Bitbanding is a feature of the ARM core.  We implement the ARM-recommend
+ * interface with uses the bit number within the word, as well as one that
+ * calculates the bit number from a single-bit-set mask.
+ */
+#define BITBAND_SRAM_REF 0x20000000
+#define BITBAND_SRAM_BASE 0x22000000
+#define BITBAND_SRAM(addr,bitnum) \
+	((BITBAND_SRAM_BASE + ((addr)-BITBAND_SRAM_REF)*32 + ((bitnum)*4)))
+#define BITBAND_PERI_REF 0x40000000
+#define BITBAND_PERI_BASE 0x42000000
+#define BITBAND_PERI(addr,bitnum) \
+	((BITBAND_PERI_BASE + ((addr)-BITBAND_PERI_REF)*32 + ((bitnum)*4)))
+
+#define BITBAND_PERIPH(addr, mask) 	BITBAND_PERI(addr, MASK_TO_BITNUM(mask))
+
+/* Convert a mask with a single bit set to the bit index.
+ * There are clever ways to do this, but we make it explicit for clarity.
+ */
+#define MASK16_TO_BITNUM(mask) \
+	((mask) == 0x01 ? 0 : (mask) == 0x02 ? 1 : (mask) == 0x04 ? 2 :		\
+	 (mask)==0x008 ?  3 : (mask) == 0x10 ? 4 : (mask) == 0x20 ? 5 :		\
+	 (mask)==0x040 ?  6 : (mask) == 0x80 ? 7 :							\
+	 (mask)==0x100 ?  8 : (mask) == 0x200 ? 9 : (mask)==0x400 ? 10		\
+	 (mask)==0x800 ? 11: (mask) == 0x1000 ? 12 : (mask)==0x2000 ? 13	\
+	 (mask)==0x4000 ? 14: (mask) == 0x8000 ? 15 :						\
+	 "Multiple bits set in bitband mask.")
+
+#define MASK32_TO_BITNUM(mask) \
+	((mask) & 0xFFFF0000 == 0 ? MASK16_TO_BITNUM(mask) :	\
+	 (mask & 0x0000FFFF == 0) ? MASK16_TO_BITNUM((mask)>>16) :	\
+	 "Multiple bits set in bitband mask")
+
 /* The SysTick timer is common across all Cortex implementations.
  * It typically defaults to a 10msec period.
  */
