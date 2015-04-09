@@ -49,8 +49,10 @@ typedef signed char int8_t;
 #define _MMIO_DWORD(mem_addr) (*(volatile uint32_t *)(mem_addr))
 #endif
 
+#if !defined(BITBAND_SRAM)
 #define BITBAND_SRAM(byte_offset, bit) \
 	((BITBAND_SRAM_BASE + (byte_offset - BITBAND_SRAM_REF)*32 + (bit*4)))
+#endif
 
 /* The AVR has a bunch of ugly types and macros to handle Harvard+flash */
 #define PROGMEM const
